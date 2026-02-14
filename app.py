@@ -9,6 +9,9 @@ NO rescaling applied — 1 stored DN = 1 native DN.
 from __future__ import annotations
 
 import io
+import shutil
+import urllib.request
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +45,76 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).parent
 ARTIFACTS = BASE_DIR / "PhotonTransferCurveArtifacts"
+
+# ---------------------------------------------------------------------------
+# Data download for cloud deployment
+# ---------------------------------------------------------------------------
+DATA_ZIP_URL = (
+    "https://github.com/brycewilson27/PhotonTransferCurve/releases/download/"
+    "v1.0-data/PhotonTransferCurveArtifacts.zip"
+)
+DATA_ZIP_SIZE_MB = 594  # approximate size for progress display
+
+
+def _ensure_data() -> None:
+    """Download and extract FITS data if not present locally."""
+    # Check if data already exists (look for a subfolder with FITS files)
+    exposure_dir = ARTIFACTS / "ExposureSweep_Gain90db"
+    if exposure_dir.is_dir() and any(exposure_dir.rglob("*.fits")):
+        return  # data already present
+
+    st.info(
+        "FITS data files not found locally. Downloading from GitHub Releases... "
+        "This is a one-time download (~594 MB) and may take a few minutes."
+    )
+
+    zip_path = BASE_DIR / "PhotonTransferCurveArtifacts.zip"
+
+    # Download with progress
+    progress = st.progress(0, text="Downloading FITS data...")
+    try:
+        req = urllib.request.urlopen(DATA_ZIP_URL)
+        total = int(req.headers.get("Content-Length", DATA_ZIP_SIZE_MB * 1048576))
+        downloaded = 0
+        chunk_size = 1024 * 1024  # 1 MB chunks
+
+        with open(zip_path, "wb") as f:
+            while True:
+                chunk = req.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                pct = min(downloaded / total, 1.0)
+                progress.progress(
+                    pct,
+                    text=f"Downloading FITS data... {downloaded // 1048576} / {total // 1048576} MB",
+                )
+    except Exception as e:
+        progress.empty()
+        if zip_path.exists():
+            zip_path.unlink()
+        st.error(f"Download failed: {e}")
+        st.stop()
+
+    # Extract
+    progress.progress(1.0, text="Extracting FITS data...")
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(ARTIFACTS)
+        zip_path.unlink()  # clean up zip after extraction
+    except Exception as e:
+        progress.empty()
+        if ARTIFACTS.exists():
+            shutil.rmtree(ARTIFACTS, ignore_errors=True)
+        st.error(f"Extraction failed: {e}")
+        st.stop()
+
+    progress.empty()
+    st.success("FITS data downloaded and extracted successfully!")
+    st.rerun()
+
+
 SWEEP_DIRS = {
     "Exposure Sweep (90 dB gain)": ARTIFACTS / "ExposureSweep_Gain90db",
     "Gain Sweep (10 ms exposure)": ARTIFACTS / "GainSweep_10msExpoTime",
@@ -1260,6 +1333,9 @@ def main():
         "AstroTracker CMOS sensor characterization | "
         "All analysis in native DN (8-bit clamped at 255, no rescaling)"
     )
+
+    # Ensure FITS data is available (downloads on first cloud deployment run)
+    _ensure_data()
 
     settings = build_sidebar()
 

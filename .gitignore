@@ -18,6 +18,7 @@ env/
 *.fits
 *.fit
 *.fts
+*.zip
 PhotonTransferCurveArtifacts/
 
 # IDE
