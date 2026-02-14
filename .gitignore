@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# FITS data files (too large for GitHub)
+*.fits
+*.fit
+*.fts
+PhotonTransferCurveArtifacts/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+nul
+
+# Streamlit
+.streamlit/
+
+# Misc
+*.log
+*.tmp
