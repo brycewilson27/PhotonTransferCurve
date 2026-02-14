@@ -31,7 +31,7 @@
 - [x] Page: Sensor Overview — FITS metadata, dataset summary, sample image viewer
 - [x] Page: PTC Analysis — interactive Plotly PTC plot with fit overlay
 - [x] Page: Sensor Metrics Dashboard — key metric cards, comparison table, CSV export
-- [x] Page: Gain Sweep Analysis — metrics vs gain curves, optimal gain identification
+- [x] Page: Gain Sweep Characterization — signal, dark level, noise, saturation, SNR vs gain
 - [x] Testing with both datasets (ExposureSweep & GainSweep)
 - [x] Page: Frame Explorer — per-setting image browser with frame previews, pixel stats, histograms, difference image, and per-pair PTC stats
 
@@ -141,3 +141,13 @@
 - Verified app still works locally (HTTP 200 on localhost:9510)
 - Pushed to `main` branch
 - **Next**: Complete Streamlit Cloud deployment at https://share.streamlit.io, update with live URL
+
+### Session 9 — 2026-02-14
+- **Redesigned Gain Sweep page**: removed all PTC terminology and reframed as "Gain Sweep Characterization"
+- Renamed page from "Gain Sweep Analysis" to "Gain Sweep Characterization" in navigation
+- New page sections: Signal Amplification (bright + dark overlay), Dark Level vs Gain, Temporal Noise vs Gain, Saturation vs Gain, SNR vs Gain, per-gain summary table with CSV export
+- Added dark frame ROI mean/std extraction from demo_data.json frame_explorer data (demo mode) and live FITS (live mode)
+- Added explainer for why noise drops at high gain (clamp artifact, not real noise reduction)
+- **Updated Theory page** (Section 6): replaced "Exposure Sweep vs Gain Sweep" comparison with "Why Vary Exposure, Not Gain?" — shorter, clearer explanation of why gain sweep is not a valid PTC, with pointer to the new characterization page
+- Removed the gain sweep PTC fit line, K metric, R^2, and "used in fit" concepts from the gain sweep page entirely
+- **Next**: Continue Phase 3 enhancements or user testing

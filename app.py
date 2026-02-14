@@ -541,44 +541,30 @@ def page_metrics_dashboard(settings: dict):
 
 
 # ---------------------------------------------------------------------------
-# Page: Gain Sweep Analysis
+# Page: Gain Sweep Characterization
 # ---------------------------------------------------------------------------
 def page_gain_sweep(settings: dict):
-    st.header("Gain Sweep Analysis")
+    st.header("Gain Sweep Characterization")
+    st.markdown(
+        "How does the sensor respond across its analog gain range? "
+        "This page shows signal, dark level, noise, and saturation "
+        "behavior at fixed 10 ms exposure as gain sweeps from 30 to 220 dB."
+    )
 
     if not settings["is_gain_sweep"]:
         st.info(
             "Select the **Gain Sweep (10 ms exposure)** dataset in the sidebar "
-            "to use this page. The Exposure Sweep dataset varies exposure time "
-            "at a single gain, so per-gain analysis is not applicable."
+            "to use this page."
         )
         return
 
-    # Run overall sweep analysis
-    st.subheader("Overall Gain Sweep PTC")
     try:
         fit_dict, pair_dicts = run_analysis(settings)
     except ValueError as e:
-        st.error(f"Overall sweep analysis failed: {e}")
+        st.error(f"Analysis failed: {e}")
         return
 
-    # Display overall results
-    c1, c2, c3 = st.columns(3)
-    c1.metric("K (DN/e-)", f"{fit_dict['K_slope']:.4f}")
-    c2.metric("R-squared", f"{fit_dict['r_squared']:.4f}")
-    c3.metric("Points used", f"{fit_dict['n_points_used']} / {fit_dict['n_points_total']}")
-
-    # Per-gain pair statistics
-    st.subheader("Per-Gain Level Statistics")
-    mask = np.array(fit_dict["fit_mask"])
-    means = [p["mean_signal"] for p in pair_dicts]
-    variances_raw = np.array([p["variance"] for p in pair_dicts])
-    if settings["apply_quant"]:
-        variances = apply_quantization_correction(variances_raw).tolist()
-    else:
-        variances = variances_raw.tolist()
-
-    # Extract numeric gain values for plotting
+    # Extract numeric gain values and dark frame stats
     gain_nums = []
     for label in [p["label"] for p in pair_dicts]:
         try:
@@ -586,107 +572,242 @@ def page_gain_sweep(settings: dict):
         except ValueError:
             gain_nums.append(0)
 
-    # Mean signal vs gain plot
-    fig_mean = go.Figure()
-    fig_mean.add_trace(go.Scatter(
+    means = [p["mean_signal"] for p in pair_dicts]
+    variances_raw = np.array([p["variance"] for p in pair_dicts])
+    if settings["apply_quant"]:
+        variances = apply_quantization_correction(variances_raw).tolist()
+    else:
+        variances = variances_raw.tolist()
+
+    # Get dark frame stats from demo data or live analysis
+    dark_means = []
+    dark_stds = []
+    if LIVE_MODE:
+        flat_pairs = collect_flat_pairs(settings["sweep_folder"])
+        roi = settings["roi"]
+        rx, ry, rw, rh = roi
+        for fp in flat_pairs:
+            if fp.dark_a is not None:
+                dark_img = load_fits_image(fp.dark_a)
+                dark_roi = dark_img[ry:ry + rh, rx:rx + rw]
+                dark_means.append(float(dark_roi.mean()))
+                dark_stds.append(float(dark_roi.std()))
+            else:
+                dark_means.append(np.nan)
+                dark_stds.append(np.nan)
+    else:
+        sweep_data = get_demo_sweep(settings)
+        fe_data = sweep_data.get("frame_explorer", [])
+        for fe in fe_data:
+            ds = fe.get("dark_stats")
+            if ds:
+                dark_means.append(ds["ROI Mean"])
+                dark_stds.append(ds["ROI Std"])
+            else:
+                dark_means.append(np.nan)
+                dark_stds.append(np.nan)
+
+    # --- Overview metrics ---
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Gain Levels", f"{len(pair_dicts)}")
+    c2.metric("Gain Range", f"{gain_nums[0]} -- {gain_nums[-1]} dB")
+    c3.metric("Fixed Exposure", "10 ms")
+    unsaturated = sum(1 for p in pair_dicts if p["sat_hi"] < settings["sat_thresh"])
+    c4.metric("Unsaturated Levels", f"{unsaturated} / {len(pair_dicts)}")
+
+    # --- 1. Signal Amplification ---
+    st.markdown("---")
+    st.subheader("Signal Amplification")
+    st.markdown(
+        "Higher analog gain amplifies the signal from a fixed photon count. "
+        "At high gains the signal clips at 255 DN (8-bit clamp ceiling)."
+    )
+
+    fig_signal = go.Figure()
+    fig_signal.add_trace(go.Scatter(
         x=gain_nums, y=means,
-        mode="markers+lines", name="Mean Signal",
-        marker=dict(size=6),
+        mode="markers+lines", name="Bright (bias-subtracted)",
+        marker=dict(size=7, color="dodgerblue"),
+        text=[p["label"] for p in pair_dicts],
+        hovertemplate="<b>%{text}</b><br>Mean: %{y:.1f} DN<extra></extra>",
     ))
-    fig_mean.add_hline(y=ADU_MAX, line_dash="dot", line_color="gray",
-                       annotation_text="255 DN clamp")
-    fig_mean.update_layout(
+    if dark_means:
+        fig_signal.add_trace(go.Scatter(
+            x=gain_nums, y=dark_means,
+            mode="markers+lines", name="Dark frame (ROI)",
+            marker=dict(size=6, color="gray", symbol="diamond"),
+            hovertemplate="Gain: %{x} dB<br>Dark mean: %{y:.1f} DN<extra></extra>",
+        ))
+    fig_signal.add_hline(y=ADU_MAX, line_dash="dot", line_color="red",
+                         annotation_text="255 DN clamp")
+    fig_signal.update_layout(
         title="Mean Signal vs Analog Gain",
         xaxis_title="Analog Gain (dB)", yaxis_title="Mean Signal (DN)",
-        height=400,
+        height=450,
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+    )
+    st.plotly_chart(fig_signal, use_container_width=True)
+
+    # --- 2. Dark Level (Black Level) ---
+    if dark_means and not all(np.isnan(v) for v in dark_means):
+        st.markdown("---")
+        st.subheader("Dark Level (Black Level) vs Gain")
+        st.markdown(
+            "The dark frame captures the sensor's output with no illumination at each gain. "
+            "As gain increases, thermal noise and readout offsets are amplified, "
+            "raising the black level floor."
+        )
+
+        fig_dark = go.Figure()
+        fig_dark.add_trace(go.Scatter(
+            x=gain_nums, y=dark_means,
+            mode="markers+lines", name="Dark ROI Mean",
+            marker=dict(size=7, color="slategray"),
+            line=dict(color="slategray"),
+        ))
+        fig_dark.add_trace(go.Scatter(
+            x=gain_nums, y=dark_stds,
+            mode="markers+lines", name="Dark ROI Std Dev",
+            marker=dict(size=6, color="orange", symbol="triangle-up"),
+            line=dict(color="orange", dash="dash"),
+        ))
+        fig_dark.update_layout(
+            title="Dark Frame Statistics vs Analog Gain",
+            xaxis_title="Analog Gain (dB)", yaxis_title="DN",
+            height=420,
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+        )
+        st.plotly_chart(fig_dark, use_container_width=True)
+
+    # --- 3. Temporal Noise ---
+    st.markdown("---")
+    st.subheader("Temporal Noise vs Gain")
+    st.markdown(
+        "Temporal noise (frame-to-frame variance from the pair-difference method) "
+        "increases with gain as both shot noise and read noise are amplified. "
+        "At very high gains, variance drops because most pixels are clamped at 255."
     )
 
-    # Variance vs gain plot
-    fig_var = go.Figure()
-    colors = ["dodgerblue" if m else "red" for m in mask]
-    fig_var.add_trace(go.Scatter(
-        x=gain_nums, y=variances,
-        mode="markers+lines", name="Variance",
-        marker=dict(size=6, color=colors),
+    noise_stds = [v ** 0.5 for v in variances]
+
+    fig_noise = go.Figure()
+    fig_noise.add_trace(go.Scatter(
+        x=gain_nums, y=noise_stds,
+        mode="markers+lines", name="Temporal Noise (std dev)",
+        marker=dict(size=7, color="mediumseagreen"),
+        text=[p["label"] for p in pair_dicts],
+        hovertemplate="<b>%{text}</b><br>Noise: %{y:.2f} DN rms<extra></extra>",
     ))
-    fig_var.update_layout(
-        title="Variance vs Analog Gain",
-        xaxis_title="Analog Gain (dB)", yaxis_title="Variance (DN^2)",
-        height=400,
+    fig_noise.update_layout(
+        title="Temporal Noise (Pair-Difference Std Dev) vs Analog Gain",
+        xaxis_title="Analog Gain (dB)", yaxis_title="Noise (DN rms)",
+        height=420,
+    )
+    st.plotly_chart(fig_noise, use_container_width=True)
+
+    with st.expander("Why does noise drop at high gain?"):
+        st.markdown(
+            "At high gain, pixels are driven to the 255 DN clamp ceiling. "
+            "Clamped pixels have zero temporal variation (they're always 255), "
+            "so the measured variance **decreases** even though the underlying "
+            "analog noise is still increasing. This is an artifact of the 8-bit "
+            "output window, not a real noise reduction."
+        )
+
+    # --- 4. Saturation ---
+    st.markdown("---")
+    st.subheader("Saturation vs Gain")
+    st.markdown(
+        "Fraction of ROI pixels hitting the floor (0 DN) or ceiling (255 DN). "
+        "Above ~150 dB, significant clipping begins."
     )
 
-    col_a, col_b = st.columns(2)
-    col_a.plotly_chart(fig_mean, use_container_width=True)
-    col_b.plotly_chart(fig_var, use_container_width=True)
-
-    # Saturation fraction vs gain
-    fig_sat = go.Figure()
     sat_his = [p["sat_hi"] * 100 for p in pair_dicts]
     sat_los = [p["sat_lo"] * 100 for p in pair_dicts]
+
+    fig_sat = go.Figure()
     fig_sat.add_trace(go.Scatter(
         x=gain_nums, y=sat_his,
-        mode="markers+lines", name="Sat Hi (%)",
-        marker=dict(color="red"),
+        mode="markers+lines", name="Ceiling (255 DN)",
+        marker=dict(color="red", size=6),
     ))
     fig_sat.add_trace(go.Scatter(
         x=gain_nums, y=sat_los,
-        mode="markers+lines", name="Sat Lo (%)",
-        marker=dict(color="blue"),
+        mode="markers+lines", name="Floor (0 DN)",
+        marker=dict(color="blue", size=6),
     ))
     fig_sat.add_hline(y=settings["sat_thresh"] * 100, line_dash="dash",
-                      line_color="orange", annotation_text="Threshold")
+                      line_color="orange", annotation_text="Exclusion threshold")
     fig_sat.update_layout(
         title="Saturation Fraction vs Analog Gain",
-        xaxis_title="Analog Gain (dB)", yaxis_title="Saturation (%)",
-        height=400,
+        xaxis_title="Analog Gain (dB)", yaxis_title="Saturated Pixels (%)",
+        height=420,
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     )
     st.plotly_chart(fig_sat, use_container_width=True)
 
-    # PTC plot colored by gain
-    st.subheader("PTC Plot (all gain levels)")
-    fig_ptc = go.Figure()
-    fig_ptc.add_trace(go.Scatter(
-        x=[means[i] for i in range(len(means)) if not mask[i]],
-        y=[variances[i] for i in range(len(variances)) if not mask[i]],
-        mode="markers", name="Excluded",
-        marker=dict(color="red", size=8, symbol="x"),
-        text=[pair_dicts[i]["label"] for i in range(len(pair_dicts)) if not mask[i]],
-        hovertemplate="<b>%{text}</b><br>Mean: %{x:.1f} DN<br>Var: %{y:.2f} DN^2<extra></extra>",
-    ))
-    fig_ptc.add_trace(go.Scatter(
-        x=[means[i] for i in range(len(means)) if mask[i]],
-        y=[variances[i] for i in range(len(variances)) if mask[i]],
-        mode="markers", name="Used in fit",
-        marker=dict(color="dodgerblue", size=8),
-        text=[pair_dicts[i]["label"] for i in range(len(pair_dicts)) if mask[i]],
-        hovertemplate="<b>%{text}</b><br>Mean: %{x:.1f} DN<br>Var: %{y:.2f} DN^2<extra></extra>",
-    ))
-    # Fit line
-    K = fit_dict["K_slope"]
-    intercept = fit_dict["intercept"]
-    used_means = [means[i] for i in range(len(means)) if mask[i]]
-    if used_means:
-        fit_x = np.linspace(0, min(max(used_means) * 1.2, ADU_MAX), 200)
-        fit_y = K * fit_x + intercept
-        fig_ptc.add_trace(go.Scatter(
-            x=fit_x, y=fit_y,
-            mode="lines",
-            name=f"Fit: Var = {K:.4f} * Mean + {intercept:.2f}",
-            line=dict(color="orange", dash="dash"),
-        ))
-    fig_ptc.add_vline(x=ADU_MAX, line_dash="dot", line_color="gray",
-                      annotation_text="255 DN clamp")
-    fig_ptc.update_layout(
-        title="Gain Sweep PTC",
-        xaxis_title="Mean Signal (DN)", yaxis_title="Variance (DN^2)",
-        height=550,
+    # --- 5. Signal-to-Noise Ratio ---
+    st.markdown("---")
+    st.subheader("Signal-to-Noise Ratio vs Gain")
+    st.markdown(
+        "SNR = mean signal / temporal noise. Initially SNR is relatively flat "
+        "(both signal and noise scale with gain), but it degrades as saturation "
+        "compresses the signal while the noise structure changes."
     )
-    st.plotly_chart(fig_ptc, use_container_width=True)
 
-    # Per-pair table
+    snr_vals = []
+    for m, ns in zip(means, noise_stds):
+        if ns > 0 and m > 0:
+            snr_vals.append(m / ns)
+        else:
+            snr_vals.append(0.0)
+
+    fig_snr = go.Figure()
+    fig_snr.add_trace(go.Scatter(
+        x=gain_nums, y=snr_vals,
+        mode="markers+lines", name="SNR",
+        marker=dict(size=7, color="purple"),
+        text=[p["label"] for p in pair_dicts],
+        hovertemplate="<b>%{text}</b><br>SNR: %{y:.1f}<extra></extra>",
+    ))
+    fig_snr.update_layout(
+        title="SNR (Mean / Temporal Noise) vs Analog Gain",
+        xaxis_title="Analog Gain (dB)", yaxis_title="SNR",
+        height=420,
+    )
+    st.plotly_chart(fig_snr, use_container_width=True)
+
+    # --- 6. Summary Table ---
+    st.markdown("---")
     st.subheader("Per-Gain Summary Table")
-    df = pairs_to_dataframe(pair_dicts, fit_dict, settings["apply_quant"])
+
+    rows = []
+    for i, p in enumerate(pair_dicts):
+        row = {
+            "Gain (dB)": gain_nums[i],
+            "Mean Signal (DN)": round(means[i], 2),
+            "Temporal Noise (DN)": round(noise_stds[i], 2),
+            "SNR": round(snr_vals[i], 1),
+            "Sat Ceiling (%)": round(sat_his[i], 3),
+            "Sat Floor (%)": round(sat_los[i], 3),
+        }
+        if dark_means:
+            row["Dark Mean (DN)"] = round(dark_means[i], 2) if not np.isnan(dark_means[i]) else "N/A"
+            row["Dark Std (DN)"] = round(dark_stds[i], 2) if not np.isnan(dark_stds[i]) else "N/A"
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # CSV export
+    csv_buf = io.StringIO()
+    df.to_csv(csv_buf, index=False)
+    st.download_button(
+        label="Export CSV",
+        data=csv_buf.getvalue(),
+        file_name="gain_sweep_characterization.csv",
+        mime="text/csv",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -826,109 +947,45 @@ def page_ptc_derivation(settings: dict):
     st.markdown("**Maximum SNR** (shot-noise limited):")
     st.latex(r"\mathrm{SNR}_{\max} = \sqrt{\mathrm{FWC}}")
 
-    # ---- 6. Exposure Sweep vs Gain Sweep ----
-    st.subheader("6. Exposure Sweep vs Gain Sweep")
+    # ---- 6. Why Vary Exposure, Not Gain? ----
+    st.subheader("6. Why Vary Exposure Time, Not Gain?")
     st.markdown(
-        "There are two fundamentally different ways to acquire PTC data. "
-        "They have **different physical meanings** and **different mathematical validity**."
+        "The PTC requires that every data point shares the **same** system gain $K$ "
+        "and read noise $\\sigma_{\\mathrm{read}}$. Only varying the illumination level "
+        "(via exposure time) satisfies this."
     )
 
-    # Exposure Sweep
-    st.markdown("---")
-    st.markdown("### Exposure Sweep (Fixed Gain, Varying Exposure Time)")
+    st.markdown("### The Correct Approach: Exposure Sweep")
     st.markdown(
-        "Hold the analog gain constant and vary the exposure time. "
-        "Longer exposures collect more photons, increasing the signal level."
-    )
-    st.markdown(
-        "**What varies:** Photon count per pixel (more photons at longer exposure)\n\n"
-        "**What is constant:** System gain $K$, read noise $\\sigma_{\\mathrm{read}}$, "
-        "all electronics settings"
+        "Hold the analog gain constant and vary exposure time. "
+        "Longer exposures collect more photons, sweeping the signal from dark to saturation."
     )
     st.latex(r"\mathrm{Var}_i = K \cdot \bar{S}_i + \sigma^2_{\mathrm{read}}")
     st.markdown(
-        "Here $K$ and $\\sigma^2_{\\mathrm{read}}$ are **the same for every data point**. "
-        "The index $i$ runs over exposure times. This is a proper linear model with "
-        "one slope and one intercept -- the standard PTC."
+        "Here $K$ and $\\sigma^2_{\\mathrm{read}}$ are **identical for every point**. "
+        "The linear fit directly yields the system gain and read noise."
     )
     st.success(
-        "The exposure sweep is the RIGOROUS PTC measurement. "
-        "Each data point samples a different signal level at the same gain, "
-        "so the linear fit directly and correctly yields K and read noise for that gain setting."
-    )
-    st.markdown(
-        "**Our ExposureSweep dataset:** 16 exposure times (3--36 ms) at fixed 90 dB gain. "
-        "Result: K = 3.13 DN/e$^-$, $R^2$ = 0.996, 9 of 16 points used."
+        "Our ExposureSweep dataset (16 exposure times, 3--36 ms, fixed 90 dB gain) "
+        "gives K = 3.13 DN/e-, R^2 = 0.996 -- a textbook PTC result."
     )
 
-    # Gain Sweep
-    st.markdown("---")
-    st.markdown("### Gain Sweep (Fixed Exposure, Varying Analog Gain)")
+    st.markdown("### Why Not Sweep Gain?")
     st.markdown(
-        "Hold the exposure time constant and vary the analog gain. "
-        "The same number of photons hits the sensor, but the electronic amplification changes."
-    )
-    st.markdown(
-        "**What varies:** System gain $K_i$ (different at each gain setting), "
-        "read noise $\\sigma_{\\mathrm{read},i}$ (also gain-dependent)\n\n"
-        "**What is constant:** Incident photon count, exposure time"
+        "If you sweep analog gain at a fixed exposure, the system gain $K_i$ and "
+        "read noise $\\sigma_{\\mathrm{read},i}$ are **different at every data point**:"
     )
     st.latex(r"\mathrm{Var}_i = K_i \cdot \bar{S}_i + \sigma^2_{\mathrm{read},i}")
-    st.warning(
-        "In the gain sweep, BOTH K and sigma_read change at every data point. "
-        "The single-line PTC model is violated -- each point has a different slope."
-    )
-
-    st.markdown("**Why it still looks like a PTC:**")
     st.markdown(
-        "Higher gain amplifies both signal and noise, so higher-gain points have "
-        "larger mean AND larger variance. The scatter of (mean, variance) pairs traces "
-        "out a curve that *resembles* a PTC, but each point lies on a **different** "
-        "underlying line with its own $K_i$."
+        "Fitting a single line through these points violates the PTC model -- "
+        "the slope is not constant. The resulting 'K' would be a meaningless average "
+        "across different amplifier configurations."
     )
-
-    st.markdown("**Mathematical comparison:**")
-    comp_data = {
-        "Property": [
-            "PTC equation", "K (gain)", "Read noise",
-            "Linear fit validity", "Per-point PTC fit", "Best for",
-        ],
-        "Exposure Sweep": [
-            "Var = K * Mean + b",
-            "Constant (one K for all points)",
-            "Constant (one sigma for all points)",
-            "Rigorous -- true linear model",
-            "N/A (fit uses all points together)",
-            "Characterizing sensor at one gain setting",
-        ],
-        "Gain Sweep": [
-            "Var_i = K_i * Mean_i + b_i",
-            "Different at each gain level",
-            "Different at each gain level",
-            "Approximation -- model is misspecified",
-            "Impossible (only 1 pair per gain)",
-            "Mapping K, read noise, FWC vs gain",
-        ],
-    }
-    st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
-
-    st.markdown(
-        "**Our GainSweep dataset:** 24 gain levels (30--220 dB) at fixed 10 ms exposure. "
-        "The overall PTC fit across all gain levels gives an approximate average $K$. "
-        "The more useful analysis is plotting per-gain-level statistics (mean, variance, "
-        "saturation fraction) to understand how the sensor behaves across its gain range."
+    st.info(
+        "A gain sweep is still useful for sensor characterization: it reveals how "
+        "signal, noise, dark level, and saturation change across the gain range. "
+        "See the **Gain Sweep Characterization** page for this analysis."
     )
-
-    with st.expander("Deeper: Why can't we fit a per-gain PTC in the gain sweep?"):
-        st.markdown(
-            "A PTC linear fit requires **at least 2 data points at the same gain setting** "
-            "to estimate slope and intercept. Our gain sweep dataset has exactly **1 bright "
-            "pair per gain level** (2 bright frames + 2 dark frames = 1 mean/variance point). "
-            "With only 1 point, the system of equations is underdetermined:\n\n"
-            "$$\\mathrm{Var} = K \\cdot \\bar{S} + b \\quad \\text{(2 unknowns, 1 equation)}$$\n\n"
-            "To enable per-gain PTC fitting, you would need to acquire multiple exposure times "
-            "at each gain setting -- essentially running an exposure sweep for every gain level."
-        )
 
     # ---- 7. The 255 DN Clamp ----
     st.subheader("7. The 255 DN Clamp Effect")
@@ -1303,7 +1360,7 @@ def main():
     page = st.sidebar.radio(
         "Page",
         ["PTC Theory & Derivation", "Sensor Overview", "PTC Analysis",
-         "Sensor Metrics", "Gain Sweep Analysis", "Frame Explorer"],
+         "Sensor Metrics", "Gain Sweep Characterization", "Frame Explorer"],
         label_visibility="collapsed",
     )
 
@@ -1315,7 +1372,7 @@ def main():
         page_ptc_analysis(settings)
     elif page == "Sensor Metrics":
         page_metrics_dashboard(settings)
-    elif page == "Gain Sweep Analysis":
+    elif page == "Gain Sweep Characterization":
         page_gain_sweep(settings)
     elif page == "Frame Explorer":
         page_frame_explorer(settings)
