@@ -961,10 +961,12 @@ def page_ptc_derivation(settings: dict):
     # ---- References ----
     st.subheader("References")
     st.markdown(
-        "1. Janesick, J. R., *Photon Transfer: DN -> Lambda*, SPIE Press (2007)\n"
-        "2. EMVA Standard 1288, Release 4.0 -- Standard for Characterization of Image Sensors\n"
-        "3. Bohndiek, S. E. et al., *A guide to photon transfer curve analysis* (2008)\n"
-        "4. Harvest Imaging, *PTC Tutorial Series*: harvestimaging.com"
+        "1. Janesick, J. R., *Photon Transfer: DN → λ*, SPIE Press (2007)\n"
+        "2. EMVA Standard 1288, Release 4.0 — Standard for Characterization of Image Sensors and Cameras\n"
+        "3. Bohndiek, S. E. et al., *Characterization and Testing of LAS: A Prototype Large Area Sensor*, "
+        "IEEE Trans. Nuclear Science **56**(5), 2938–2946 (2009)\n"
+        "4. Harvest Imaging, *PTC Tutorial Series*: [harvestimaging.com](https://harvestimaging.com/blog/?p=1034)\n"
+        "5. McLean, I. S., *Electronic Imaging in Astronomy: Detectors and Instrumentation*, 2nd ed., Springer (2008)"
     )
 
 
