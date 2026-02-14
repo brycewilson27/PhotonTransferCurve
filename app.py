@@ -1,37 +1,31 @@
 """
-Photon Transfer Curve (PTC) Analysis — Streamlit Dashboard
+Photon Transfer Curve (PTC) Analysis -- Streamlit Dashboard
 
 Interactive sensor characterization tool for AstroTracker CMOS star tracker.
 All analysis in native DN (stored 8-bit = native 12-bit, clamped at 255).
-NO rescaling applied — 1 stored DN = 1 native DN.
+NO rescaling applied -- 1 stored DN = 1 native DN.
+
+Supports two modes:
+  - LIVE MODE: FITS data present locally, full interactive analysis
+  - DEMO MODE: precomputed results from demo_data.json (Streamlit Cloud)
 """
 
 from __future__ import annotations
 
 import io
-import shutil
-import urllib.request
-import zipfile
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from astropy.io import fits
 
 from ptc_analysis import (
     ADU_MAX,
     DEFAULT_ROI,
     DEFAULT_SAT_THRESH,
-    PairResult,
-    PTCFitResult,
     apply_quantization_correction,
-    collect_flat_pairs,
-    load_fits_image,
-    make_master_bias,
-    mean_var_from_pair,
-    run_ptc_analysis,
 )
 
 # ---------------------------------------------------------------------------
@@ -45,76 +39,9 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).parent
 ARTIFACTS = BASE_DIR / "PhotonTransferCurveArtifacts"
+DEMO_DATA_PATH = BASE_DIR / "demo_data.json"
 
-# ---------------------------------------------------------------------------
-# Data download for cloud deployment
-# ---------------------------------------------------------------------------
-DATA_ZIP_URL = (
-    "https://github.com/brycewilson27/PhotonTransferCurve/releases/download/"
-    "v1.0-data/PhotonTransferCurveArtifacts.zip"
-)
-DATA_ZIP_SIZE_MB = 594  # approximate size for progress display
-
-
-def _ensure_data() -> None:
-    """Download and extract FITS data if not present locally."""
-    # Check if data already exists (look for a subfolder with FITS files)
-    exposure_dir = ARTIFACTS / "ExposureSweep_Gain90db"
-    if exposure_dir.is_dir() and any(exposure_dir.rglob("*.fits")):
-        return  # data already present
-
-    st.info(
-        "FITS data files not found locally. Downloading from GitHub Releases... "
-        "This is a one-time download (~594 MB) and may take a few minutes."
-    )
-
-    zip_path = BASE_DIR / "PhotonTransferCurveArtifacts.zip"
-
-    # Download with progress
-    progress = st.progress(0, text="Downloading FITS data...")
-    try:
-        req = urllib.request.urlopen(DATA_ZIP_URL)
-        total = int(req.headers.get("Content-Length", DATA_ZIP_SIZE_MB * 1048576))
-        downloaded = 0
-        chunk_size = 1024 * 1024  # 1 MB chunks
-
-        with open(zip_path, "wb") as f:
-            while True:
-                chunk = req.read(chunk_size)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                pct = min(downloaded / total, 1.0)
-                progress.progress(
-                    pct,
-                    text=f"Downloading FITS data... {downloaded // 1048576} / {total // 1048576} MB",
-                )
-    except Exception as e:
-        progress.empty()
-        if zip_path.exists():
-            zip_path.unlink()
-        st.error(f"Download failed: {e}")
-        st.stop()
-
-    # Extract
-    progress.progress(1.0, text="Extracting FITS data...")
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(ARTIFACTS)
-        zip_path.unlink()  # clean up zip after extraction
-    except Exception as e:
-        progress.empty()
-        if ARTIFACTS.exists():
-            shutil.rmtree(ARTIFACTS, ignore_errors=True)
-        st.error(f"Extraction failed: {e}")
-        st.stop()
-
-    progress.empty()
-    st.success("FITS data downloaded and extracted successfully!")
-    st.rerun()
-
-
+# Detect mode: LIVE if FITS data exists, DEMO otherwise
 SWEEP_DIRS = {
     "Exposure Sweep (90 dB gain)": ARTIFACTS / "ExposureSweep_Gain90db",
     "Gain Sweep (10 ms exposure)": ARTIFACTS / "GainSweep_10msExpoTime",
@@ -124,9 +51,37 @@ GLOBAL_BIAS_PATHS = [
     ARTIFACTS / "ExposureSweep_Gain90db" / "Black_Image2.fits",
 ]
 
+_exposure_dir = ARTIFACTS / "ExposureSweep_Gain90db"
+LIVE_MODE = _exposure_dir.is_dir() and any(_exposure_dir.glob("*/*.fits"))
+
 # Image dimensions (from sensor spec)
 IMG_HEIGHT = 1552
 IMG_WIDTH = 2064
+
+
+# ---------------------------------------------------------------------------
+# Demo data loader (cached)
+# ---------------------------------------------------------------------------
+@st.cache_data
+def load_demo_data() -> dict:
+    """Load precomputed analysis results from demo_data.json."""
+    with open(DEMO_DATA_PATH) as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Conditional imports for live mode only
+# ---------------------------------------------------------------------------
+if LIVE_MODE:
+    from astropy.io import fits
+
+    from ptc_analysis import (
+        collect_flat_pairs,
+        load_fits_image,
+        make_master_bias,
+        mean_var_from_pair,
+        run_ptc_analysis,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +91,13 @@ def build_sidebar() -> dict:
     """Render sidebar controls and return current settings."""
     st.sidebar.title("PTC Analysis Controls")
 
+    if not LIVE_MODE:
+        st.sidebar.info(
+            "Running in **demo mode** with precomputed results. "
+            "Sidebar controls show default settings used during analysis."
+        )
+
     dataset_name = st.sidebar.selectbox("Dataset", list(SWEEP_DIRS.keys()))
-    sweep_folder = SWEEP_DIRS[dataset_name]
     is_gain_sweep = "Gain" in dataset_name
 
     st.sidebar.markdown("---")
@@ -178,7 +138,7 @@ def build_sidebar() -> dict:
 
     return {
         "dataset_name": dataset_name,
-        "sweep_folder": sweep_folder,
+        "sweep_folder": SWEEP_DIRS[dataset_name],
         "is_gain_sweep": is_gain_sweep,
         "roi": roi,
         "sat_thresh": sat_thresh,
@@ -188,7 +148,7 @@ def build_sidebar() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Cached analysis runner
+# Analysis runner (live or demo)
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner="Running PTC analysis...")
 def cached_ptc_analysis(
@@ -209,7 +169,6 @@ def cached_ptc_analysis(
         apply_quant_corr=apply_quant,
         use_local_dark=use_local_dark,
     )
-    # Serialize for caching (dataclasses with numpy arrays aren't hashable)
     fit_dict = {
         "K_slope": fit_result.K_slope,
         "intercept": fit_result.intercept,
@@ -240,16 +199,32 @@ def cached_ptc_analysis(
 
 
 def run_analysis(settings: dict) -> tuple[dict, list[dict]]:
-    """Wrapper that passes settings to the cached analysis function."""
-    bias_str = [str(p) for p in GLOBAL_BIAS_PATHS] if GLOBAL_BIAS_PATHS[0].exists() else None
-    return cached_ptc_analysis(
-        sweep_folder=str(settings["sweep_folder"]),
-        bias_paths_str=bias_str,
-        roi=settings["roi"],
-        sat_thresh=settings["sat_thresh"],
-        apply_quant=settings["apply_quant"],
-        use_local_dark=settings["use_local_dark"],
-    )
+    """Get analysis results -- live or from demo data."""
+    if LIVE_MODE:
+        bias_str = (
+            [str(p) for p in GLOBAL_BIAS_PATHS]
+            if GLOBAL_BIAS_PATHS[0].exists()
+            else None
+        )
+        return cached_ptc_analysis(
+            sweep_folder=str(settings["sweep_folder"]),
+            bias_paths_str=bias_str,
+            roi=settings["roi"],
+            sat_thresh=settings["sat_thresh"],
+            apply_quant=settings["apply_quant"],
+            use_local_dark=settings["use_local_dark"],
+        )
+    else:
+        demo = load_demo_data()
+        key = "gain_sweep" if settings["is_gain_sweep"] else "exposure_sweep"
+        return demo[key]["fit"], demo[key]["pairs"]
+
+
+def get_demo_sweep(settings: dict) -> dict:
+    """Get the full demo data dict for the selected sweep."""
+    demo = load_demo_data()
+    key = "gain_sweep" if settings["is_gain_sweep"] else "exposure_sweep"
+    return demo[key]
 
 
 # ---------------------------------------------------------------------------
@@ -283,22 +258,26 @@ def pairs_to_dataframe(pair_dicts: list[dict], fit_dict: dict, apply_quant: bool
 def page_sensor_overview(settings: dict):
     st.header("Sensor Overview")
 
-    # Dataset info
-    sweep = settings["sweep_folder"]
-    flat_pairs = collect_flat_pairs(sweep)
-    n_pairs = len(flat_pairs)
+    if LIVE_MODE:
+        sweep = settings["sweep_folder"]
+        flat_pairs = collect_flat_pairs(sweep)
+        n_pairs = len(flat_pairs)
+        labels = [fp.label for fp in flat_pairs]
+    else:
+        sweep_data = get_demo_sweep(settings)
+        n_pairs = sweep_data["n_pairs"]
+        labels = sweep_data["labels"]
 
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Dataset Info")
         st.markdown(f"**Dataset:** {settings['dataset_name']}")
-        st.markdown(f"**Path:** `{sweep}`")
+        if LIVE_MODE:
+            st.markdown(f"**Path:** `{settings['sweep_folder']}`")
         st.markdown(f"**Exposure/gain levels:** {n_pairs}")
         st.markdown(f"**Frames per level:** 2 bright + 2 dark")
         st.markdown(f"**Total usable pairs:** {n_pairs}")
 
-        # Labels
-        labels = [fp.label for fp in flat_pairs]
         if settings["is_gain_sweep"]:
             st.markdown(f"**Gain levels:** {', '.join(labels)}")
         else:
@@ -312,15 +291,13 @@ def page_sensor_overview(settings: dict):
         st.markdown("**Image size:** 2064 x 1552 pixels")
         st.markdown("**Key:** 1 stored DN = 1 native DN (clamped, not rescaled)")
 
-        # Read FITS header from first bright frame
-        if flat_pairs:
+        if LIVE_MODE and flat_pairs:
             first_file = flat_pairs[0].bright_a
             try:
                 with fits.open(str(first_file)) as hdul:
                     header = hdul[0].header
                     if len(header) > 0:
                         st.markdown("**FITS Header (sample):**")
-                        # Show a few key header cards
                         header_items = []
                         for key in header.keys():
                             if key and key not in ("", "COMMENT", "HISTORY"):
@@ -329,45 +306,67 @@ def page_sensor_overview(settings: dict):
                             st.code("\n".join(header_items[:15]), language="text")
             except Exception:
                 pass
+        elif not LIVE_MODE and not settings["is_gain_sweep"]:
+            sweep_data = get_demo_sweep(settings)
+            if "header_text" in sweep_data:
+                st.markdown("**FITS Header (sample):**")
+                st.code(sweep_data["header_text"], language="text")
 
     # Sample image with ROI overlay
     st.subheader("Sample Image with ROI Overlay")
-    if flat_pairs:
+
+    if LIVE_MODE and flat_pairs:
         sample_path = flat_pairs[len(flat_pairs) // 2].bright_a
         img = load_fits_image(sample_path)
+        img_title = sample_path.name
+    elif not LIVE_MODE and not settings["is_gain_sweep"]:
+        sweep_data = get_demo_sweep(settings)
+        if "sample_image_ds" in sweep_data:
+            img = np.array(sweep_data["sample_image_ds"])
+            ds = sweep_data["sample_image_ds_factor"]
+            img_title = f"{sweep_data['sample_image_name']} (downsampled {ds}x)"
+        else:
+            img = None
+            img_title = ""
+    else:
+        img = None
+        img_title = ""
 
+    if img is not None:
         roi = settings["roi"]
         rx, ry, rw, rh = roi
+        # Scale ROI coords for downsampled image in demo mode
+        if not LIVE_MODE and not settings["is_gain_sweep"]:
+            ds = get_demo_sweep(settings).get("sample_image_ds_factor", 1)
+            rx_s, ry_s, rw_s, rh_s = rx // ds, ry // ds, rw // ds, rh // ds
+        else:
+            rx_s, ry_s, rw_s, rh_s = rx, ry, rw, rh
 
         fig = go.Figure()
         fig.add_trace(go.Heatmap(
-            z=img,
-            colorscale="gray",
-            showscale=True,
-            colorbar=dict(title="DN"),
-            reversescale=False,
+            z=img, colorscale="gray", showscale=True,
+            colorbar=dict(title="DN"), reversescale=False,
         ))
-        # ROI rectangle
         fig.add_shape(
             type="rect",
-            x0=rx, y0=ry, x1=rx + rw, y1=ry + rh,
+            x0=rx_s, y0=ry_s, x1=rx_s + rw_s, y1=ry_s + rh_s,
             line=dict(color="red", width=2),
         )
         fig.add_annotation(
-            x=rx + rw / 2, y=ry - 20,
+            x=rx_s + rw_s / 2, y=ry_s - 10,
             text=f"ROI ({rw}x{rh})",
             showarrow=False,
             font=dict(color="red", size=12),
         )
         fig.update_layout(
-            title=f"Sample: {sample_path.name}",
-            xaxis_title="X (pixels)",
-            yaxis_title="Y (pixels)",
+            title=f"Sample: {img_title}",
+            xaxis_title="X (pixels)", yaxis_title="Y (pixels)",
             yaxis=dict(autorange="reversed"),
-            width=900,
-            height=700,
+            width=900, height=700,
         )
         st.plotly_chart(fig, use_container_width=True)
+    elif not LIVE_MODE and settings["is_gain_sweep"]:
+        st.info("Sample image preview is available for the Exposure Sweep dataset.")
     else:
         st.warning("No flat-field pairs found in this dataset.")
 
@@ -429,8 +428,7 @@ def page_ptc_analysis(settings: dict):
 
     # Fit line
     fig.add_trace(go.Scatter(
-        x=fit_x,
-        y=fit_y,
+        x=fit_x, y=fit_y,
         mode="lines",
         name=f"Fit: Var = {K:.4f} * Mean + {intercept:.2f}",
         line=dict(color="orange", dash="dash"),
@@ -438,11 +436,8 @@ def page_ptc_analysis(settings: dict):
 
     # Vertical clamp ceiling line
     fig.add_vline(
-        x=ADU_MAX,
-        line_dash="dot",
-        line_color="gray",
-        annotation_text="255 DN clamp",
-        annotation_position="top left",
+        x=ADU_MAX, line_dash="dot", line_color="gray",
+        annotation_text="255 DN clamp", annotation_position="top left",
     )
 
     axis_type = "log" if use_log else "linear"
@@ -559,83 +554,7 @@ def page_gain_sweep(settings: dict):
         )
         return
 
-    sweep_folder = settings["sweep_folder"]
-    flat_pairs = collect_flat_pairs(sweep_folder)
-    if not flat_pairs:
-        st.error("No flat-field pairs found in gain sweep dataset.")
-        return
-
-    bias_str = [str(p) for p in GLOBAL_BIAS_PATHS] if GLOBAL_BIAS_PATHS[0].exists() else None
-
-    # Analyze each gain level individually
-    gain_labels: list[str] = []
-    conv_gains: list[float] = []
-    read_noises_e: list[float] = []
-    read_noises_dn: list[float] = []
-    fwc_es: list[float] = []
-    k_slopes: list[float] = []
-    r_squareds: list[float] = []
-    n_used_list: list[int] = []
-    n_total_list: list[int] = []
-    errors: list[str] = []
-
-    progress = st.progress(0, text="Analyzing gain levels...")
-    for idx, fp in enumerate(flat_pairs):
-        progress.progress((idx + 1) / len(flat_pairs), text=f"Analyzing {fp.label}...")
-        gain_labels.append(fp.label)
-
-        # Build local bias for this gain
-        try:
-            if fp.dark_a is not None and fp.dark_b is not None:
-                local_bias = make_master_bias([fp.dark_a, fp.dark_b])
-            elif bias_str:
-                local_bias = make_master_bias([Path(p) for p in bias_str])
-            else:
-                errors.append(f"{fp.label}: no bias available")
-                conv_gains.append(np.nan)
-                read_noises_e.append(np.nan)
-                read_noises_dn.append(np.nan)
-                fwc_es.append(np.nan)
-                k_slopes.append(np.nan)
-                r_squareds.append(np.nan)
-                n_used_list.append(0)
-                n_total_list.append(1)
-                continue
-
-            # For a single gain level, we only have one bright pair.
-            # We can still compute mean/var from this single pair, but can't fit a line.
-            # For gain sweep, run the full analysis on the entire sweep to get overall fit,
-            # then also extract per-gain-level single-pair statistics.
-            from ptc_analysis import mean_var_from_pair
-
-            pr = mean_var_from_pair(
-                fp.bright_a, fp.bright_b, local_bias, settings["roi"]
-            )
-            # With a single pair, we can't do a PTC fit. Store the raw values.
-            # The per-gain K comes from the overall sweep fit.
-            conv_gains.append(np.nan)  # placeholder, filled from sweep fit
-            read_noises_e.append(np.nan)
-            read_noises_dn.append(np.nan)
-            fwc_es.append(np.nan)
-            k_slopes.append(np.nan)
-            r_squareds.append(np.nan)
-            n_used_list.append(1)
-            n_total_list.append(1)
-
-        except Exception as exc:
-            errors.append(f"{fp.label}: {exc}")
-            conv_gains.append(np.nan)
-            read_noises_e.append(np.nan)
-            read_noises_dn.append(np.nan)
-            fwc_es.append(np.nan)
-            k_slopes.append(np.nan)
-            r_squareds.append(np.nan)
-            n_used_list.append(0)
-            n_total_list.append(1)
-
-    progress.empty()
-
-    # Run overall sweep analysis to get the single PTC fit across all gain levels
+    # Run overall sweep analysis
     st.subheader("Overall Gain Sweep PTC")
     try:
         fit_dict, pair_dicts = run_analysis(settings)
@@ -670,18 +589,15 @@ def page_gain_sweep(settings: dict):
     # Mean signal vs gain plot
     fig_mean = go.Figure()
     fig_mean.add_trace(go.Scatter(
-        x=gain_nums,
-        y=means,
-        mode="markers+lines",
-        name="Mean Signal",
+        x=gain_nums, y=means,
+        mode="markers+lines", name="Mean Signal",
         marker=dict(size=6),
     ))
     fig_mean.add_hline(y=ADU_MAX, line_dash="dot", line_color="gray",
                        annotation_text="255 DN clamp")
     fig_mean.update_layout(
         title="Mean Signal vs Analog Gain",
-        xaxis_title="Analog Gain (dB)",
-        yaxis_title="Mean Signal (DN)",
+        xaxis_title="Analog Gain (dB)", yaxis_title="Mean Signal (DN)",
         height=400,
     )
 
@@ -689,16 +605,13 @@ def page_gain_sweep(settings: dict):
     fig_var = go.Figure()
     colors = ["dodgerblue" if m else "red" for m in mask]
     fig_var.add_trace(go.Scatter(
-        x=gain_nums,
-        y=variances,
-        mode="markers+lines",
-        name="Variance",
+        x=gain_nums, y=variances,
+        mode="markers+lines", name="Variance",
         marker=dict(size=6, color=colors),
     ))
     fig_var.update_layout(
         title="Variance vs Analog Gain",
-        xaxis_title="Analog Gain (dB)",
-        yaxis_title="Variance (DN^2)",
+        xaxis_title="Analog Gain (dB)", yaxis_title="Variance (DN^2)",
         height=400,
     )
 
@@ -724,8 +637,7 @@ def page_gain_sweep(settings: dict):
                       line_color="orange", annotation_text="Threshold")
     fig_sat.update_layout(
         title="Saturation Fraction vs Analog Gain",
-        xaxis_title="Analog Gain (dB)",
-        yaxis_title="Saturation (%)",
+        xaxis_title="Analog Gain (dB)", yaxis_title="Saturation (%)",
         height=400,
     )
     st.plotly_chart(fig_sat, use_container_width=True)
@@ -736,8 +648,7 @@ def page_gain_sweep(settings: dict):
     fig_ptc.add_trace(go.Scatter(
         x=[means[i] for i in range(len(means)) if not mask[i]],
         y=[variances[i] for i in range(len(variances)) if not mask[i]],
-        mode="markers",
-        name="Excluded",
+        mode="markers", name="Excluded",
         marker=dict(color="red", size=8, symbol="x"),
         text=[pair_dicts[i]["label"] for i in range(len(pair_dicts)) if not mask[i]],
         hovertemplate="<b>%{text}</b><br>Mean: %{x:.1f} DN<br>Var: %{y:.2f} DN^2<extra></extra>",
@@ -745,8 +656,7 @@ def page_gain_sweep(settings: dict):
     fig_ptc.add_trace(go.Scatter(
         x=[means[i] for i in range(len(means)) if mask[i]],
         y=[variances[i] for i in range(len(variances)) if mask[i]],
-        mode="markers",
-        name="Used in fit",
+        mode="markers", name="Used in fit",
         marker=dict(color="dodgerblue", size=8),
         text=[pair_dicts[i]["label"] for i in range(len(pair_dicts)) if mask[i]],
         hovertemplate="<b>%{text}</b><br>Mean: %{x:.1f} DN<br>Var: %{y:.2f} DN^2<extra></extra>",
@@ -768,8 +678,7 @@ def page_gain_sweep(settings: dict):
                       annotation_text="255 DN clamp")
     fig_ptc.update_layout(
         title="Gain Sweep PTC",
-        xaxis_title="Mean Signal (DN)",
-        yaxis_title="Variance (DN^2)",
+        xaxis_title="Mean Signal (DN)", yaxis_title="Variance (DN^2)",
         height=550,
     )
     st.plotly_chart(fig_ptc, use_container_width=True)
@@ -778,11 +687,6 @@ def page_gain_sweep(settings: dict):
     st.subheader("Per-Gain Summary Table")
     df = pairs_to_dataframe(pair_dicts, fit_dict, settings["apply_quant"])
     st.dataframe(df, use_container_width=True, hide_index=True)
-
-    if errors:
-        st.subheader("Errors")
-        for err in errors:
-            st.error(err)
 
 
 # ---------------------------------------------------------------------------
@@ -986,12 +890,8 @@ def page_ptc_derivation(settings: dict):
     st.markdown("**Mathematical comparison:**")
     comp_data = {
         "Property": [
-            "PTC equation",
-            "K (gain)",
-            "Read noise",
-            "Linear fit validity",
-            "Per-point PTC fit",
-            "Best for",
+            "PTC equation", "K (gain)", "Read noise",
+            "Linear fit validity", "Per-point PTC fit", "Best for",
         ],
         "Exposure Sweep": [
             "Var = K * Mean + b",
@@ -1037,9 +937,7 @@ def page_ptc_derivation(settings: dict):
         "`stored = min(native, 255)`. This is **not** a rescale -- 1 stored DN = 1 native DN."
     )
 
-    st.markdown(
-        "The clamp creates three zones in the PTC data:"
-    )
+    st.markdown("The clamp creates three zones in the PTC data:")
     st.markdown(
         "| Zone | Condition | Effect |\n"
         "|------|-----------|--------|\n"
@@ -1076,13 +974,6 @@ def page_ptc_derivation(settings: dict):
 def page_frame_explorer(settings: dict):
     st.header("Frame Explorer")
 
-    sweep_folder = settings["sweep_folder"]
-    flat_pairs = collect_flat_pairs(sweep_folder)
-    if not flat_pairs:
-        st.warning("No flat-field pairs found in this dataset.")
-        return
-
-    # Run overall PTC analysis for context (mini PTC plot, fit inclusion)
     try:
         fit_dict, pair_dicts = run_analysis(settings)
     except ValueError as e:
@@ -1097,145 +988,206 @@ def page_frame_explorer(settings: dict):
     else:
         all_variances = all_variances_raw
 
+    # Get labels
+    if LIVE_MODE:
+        sweep_folder = settings["sweep_folder"]
+        flat_pairs = collect_flat_pairs(sweep_folder)
+        labels = [fp.label for fp in flat_pairs]
+    else:
+        sweep_data = get_demo_sweep(settings)
+        labels = sweep_data["labels"]
+        fe_data = sweep_data.get("frame_explorer", [])
+
     # --- Setting selector ---
-    labels = [fp.label for fp in flat_pairs]
     sel_idx = st.selectbox(
         "Select exposure/gain level",
         range(len(labels)),
         format_func=lambda i: labels[i],
     )
-    fp = flat_pairs[sel_idx]
     pd_pair = pair_dicts[sel_idx]
     pair_used = mask[sel_idx]
 
     roi = settings["roi"]
     rx, ry, rw, rh = roi
 
-    # --- Load frames ---
-    img_a = load_fits_image(fp.bright_a)
-    img_b = load_fits_image(fp.bright_b)
-    has_dark = fp.dark_a is not None and fp.dark_b is not None
-    if has_dark:
-        img_dark_a = load_fits_image(fp.dark_a)
+    if LIVE_MODE:
+        fp = flat_pairs[sel_idx]
+        # --- Load frames ---
+        img_a = load_fits_image(fp.bright_a)
+        img_b = load_fits_image(fp.bright_b)
+        has_dark = fp.dark_a is not None and fp.dark_b is not None
+        if has_dark:
+            img_dark_a = load_fits_image(fp.dark_a)
 
-    # --- Frame Previews (Bright A, Bright B, Dark) ---
-    st.subheader("Frame Previews")
-    n_preview_cols = 3 if has_dark else 2
-    preview_cols = st.columns(n_preview_cols)
+        # --- Frame Previews ---
+        st.subheader("Frame Previews")
+        n_preview_cols = 3 if has_dark else 2
+        preview_cols = st.columns(n_preview_cols)
 
-    def _frame_heatmap(img: np.ndarray, title: str) -> go.Figure:
-        fig = go.Figure()
-        fig.add_trace(go.Heatmap(
-            z=img, colorscale="gray", showscale=True,
-            colorbar=dict(title="DN"),
-        ))
-        fig.add_shape(
-            type="rect",
-            x0=rx, y0=ry, x1=rx + rw, y1=ry + rh,
-            line=dict(color="red", width=2),
-        )
-        fig.update_layout(
-            title=title, xaxis_title="X", yaxis_title="Y",
-            yaxis=dict(autorange="reversed"),
-            height=350, margin=dict(t=40, b=30, l=30, r=30),
-        )
-        return fig
+        def _frame_heatmap(img: np.ndarray, title: str) -> go.Figure:
+            fig = go.Figure()
+            fig.add_trace(go.Heatmap(
+                z=img, colorscale="gray", showscale=True,
+                colorbar=dict(title="DN"),
+            ))
+            fig.add_shape(
+                type="rect",
+                x0=rx, y0=ry, x1=rx + rw, y1=ry + rh,
+                line=dict(color="red", width=2),
+            )
+            fig.update_layout(
+                title=title, xaxis_title="X", yaxis_title="Y",
+                yaxis=dict(autorange="reversed"),
+                height=350, margin=dict(t=40, b=30, l=30, r=30),
+            )
+            return fig
 
-    with preview_cols[0]:
-        st.plotly_chart(
-            _frame_heatmap(img_a, f"Bright A: {fp.bright_a.name}"),
-            use_container_width=True,
-        )
-    with preview_cols[1]:
-        st.plotly_chart(
-            _frame_heatmap(img_b, f"Bright B: {fp.bright_b.name}"),
-            use_container_width=True,
-        )
-    if has_dark:
-        with preview_cols[2]:
+        with preview_cols[0]:
             st.plotly_chart(
-                _frame_heatmap(img_dark_a, f"Dark: {fp.dark_a.name}"),
+                _frame_heatmap(img_a, f"Bright A: {fp.bright_a.name}"),
                 use_container_width=True,
             )
+        with preview_cols[1]:
+            st.plotly_chart(
+                _frame_heatmap(img_b, f"Bright B: {fp.bright_b.name}"),
+                use_container_width=True,
+            )
+        if has_dark:
+            with preview_cols[2]:
+                st.plotly_chart(
+                    _frame_heatmap(img_dark_a, f"Dark: {fp.dark_a.name}"),
+                    use_container_width=True,
+                )
 
-    # --- Pixel Statistics ---
-    st.subheader("Pixel Statistics")
+        # --- Pixel Statistics ---
+        st.subheader("Pixel Statistics")
 
-    def _pixel_stats(img: np.ndarray, label: str) -> dict:
-        roi_crop = img[ry : ry + rh, rx : rx + rw]
-        return {
-            "Frame": label,
-            "Full Mean": round(float(img.mean()), 2),
-            "Full Std": round(float(img.std()), 2),
-            "Full Min": int(img.min()),
-            "Full Max": int(img.max()),
-            "ROI Mean": round(float(roi_crop.mean()), 2),
-            "ROI Std": round(float(roi_crop.std()), 2),
-            "ROI Min": int(roi_crop.min()),
-            "ROI Max": int(roi_crop.max()),
-        }
+        def _pixel_stats(img: np.ndarray, label: str) -> dict:
+            roi_crop = img[ry: ry + rh, rx: rx + rw]
+            return {
+                "Frame": label,
+                "Full Mean": round(float(img.mean()), 2),
+                "Full Std": round(float(img.std()), 2),
+                "Full Min": int(img.min()),
+                "Full Max": int(img.max()),
+                "ROI Mean": round(float(roi_crop.mean()), 2),
+                "ROI Std": round(float(roi_crop.std()), 2),
+                "ROI Min": int(roi_crop.min()),
+                "ROI Max": int(roi_crop.max()),
+            }
 
-    stats_rows = [
-        _pixel_stats(img_a, "Bright A"),
-        _pixel_stats(img_b, "Bright B"),
-    ]
-    if has_dark:
-        stats_rows.append(_pixel_stats(img_dark_a, "Dark"))
-    st.dataframe(pd.DataFrame(stats_rows), use_container_width=True, hide_index=True)
+        stats_rows = [
+            _pixel_stats(img_a, "Bright A"),
+            _pixel_stats(img_b, "Bright B"),
+        ]
+        if has_dark:
+            stats_rows.append(_pixel_stats(img_dark_a, "Dark"))
+        st.dataframe(pd.DataFrame(stats_rows), use_container_width=True, hide_index=True)
 
-    # --- Intensity Histogram ---
-    st.subheader("ROI Intensity Histogram")
-    hist_frame = st.radio(
-        "Histogram frame", ["Bright A", "Bright B"] + (["Dark"] if has_dark else []),
-        horizontal=True,
-    )
-    if hist_frame == "Bright A":
-        hist_data = img_a[ry : ry + rh, rx : rx + rw].ravel()
-    elif hist_frame == "Bright B":
-        hist_data = img_b[ry : ry + rh, rx : rx + rw].ravel()
+        # --- Intensity Histogram ---
+        st.subheader("ROI Intensity Histogram")
+        hist_frame = st.radio(
+            "Histogram frame", ["Bright A", "Bright B"] + (["Dark"] if has_dark else []),
+            horizontal=True,
+        )
+        if hist_frame == "Bright A":
+            hist_data = img_a[ry: ry + rh, rx: rx + rw].ravel()
+        elif hist_frame == "Bright B":
+            hist_data = img_b[ry: ry + rh, rx: rx + rw].ravel()
+        else:
+            hist_data = img_dark_a[ry: ry + rh, rx: rx + rw].ravel()
+
+        fig_hist = go.Figure()
+        fig_hist.add_trace(go.Histogram(
+            x=hist_data, nbinsx=256, marker_color="steelblue",
+            name="Pixel counts",
+        ))
+        fig_hist.add_vline(x=0, line_dash="dot", line_color="blue",
+                           annotation_text="Floor (0)")
+        fig_hist.add_vline(x=ADU_MAX, line_dash="dot", line_color="red",
+                           annotation_text="Clamp (255)")
+        fig_hist.update_layout(
+            title=f"ROI Intensity Distribution ({hist_frame})",
+            xaxis_title="Pixel Value (DN)", yaxis_title="Count",
+            height=350,
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+        # --- Difference Image (A - B) ---
+        st.subheader("Difference Image (A - B)")
+        diff_img = img_a.astype(np.float64) - img_b.astype(np.float64)
+        diff_roi = diff_img[ry: ry + rh, rx: rx + rw]
+
+        fig_diff = go.Figure()
+        fig_diff.add_trace(go.Heatmap(
+            z=diff_roi, colorscale="RdBu_r", zmid=0,
+            showscale=True, colorbar=dict(title="DN"),
+        ))
+        fig_diff.update_layout(
+            title=f"A - B (ROI) | mean={diff_roi.mean():.3f}, std={diff_roi.std():.3f}",
+            xaxis_title="X (ROI)", yaxis_title="Y (ROI)",
+            yaxis=dict(autorange="reversed"),
+            height=400,
+        )
+        st.plotly_chart(fig_diff, use_container_width=True)
+
     else:
-        hist_data = img_dark_a[ry : ry + rh, rx : rx + rw].ravel()
+        # DEMO MODE: use precomputed data
+        if sel_idx < len(fe_data):
+            fe = fe_data[sel_idx]
 
-    fig_hist = go.Figure()
-    fig_hist.add_trace(go.Histogram(
-        x=hist_data, nbinsx=256, marker_color="steelblue",
-        name="Pixel counts",
-    ))
-    fig_hist.add_vline(x=0, line_dash="dot", line_color="blue",
-                       annotation_text="Floor (0)")
-    fig_hist.add_vline(x=ADU_MAX, line_dash="dot", line_color="red",
-                       annotation_text="Clamp (255)")
-    fig_hist.update_layout(
-        title=f"ROI Intensity Distribution ({hist_frame})",
-        xaxis_title="Pixel Value (DN)", yaxis_title="Count",
-        height=350,
-    )
-    st.plotly_chart(fig_hist, use_container_width=True)
+            st.subheader("Frame Previews")
+            st.info(
+                "Full-resolution frame previews require local FITS data. "
+                "Showing precomputed statistics below."
+            )
 
-    # --- Difference Image (A - B) ---
-    st.subheader("Difference Image (A - B)")
-    diff_img = img_a.astype(np.float64) - img_b.astype(np.float64)
-    diff_roi = diff_img[ry : ry + rh, rx : rx + rw]
+            # --- Pixel Statistics from demo data ---
+            st.subheader("Pixel Statistics")
+            stats_rows = [
+                {"Frame": f"Bright A ({fe['bright_a_name']})", **fe["stats_a"]},
+                {"Frame": f"Bright B ({fe['bright_b_name']})", **fe["stats_b"]},
+            ]
+            if fe.get("dark_stats"):
+                stats_rows.append(
+                    {"Frame": f"Dark ({fe['dark_name']})", **fe["dark_stats"]}
+                )
+            st.dataframe(pd.DataFrame(stats_rows), use_container_width=True, hide_index=True)
 
-    fig_diff = go.Figure()
-    fig_diff.add_trace(go.Heatmap(
-        z=diff_roi,
-        colorscale="RdBu_r",
-        zmid=0,
-        showscale=True,
-        colorbar=dict(title="DN"),
-    ))
-    fig_diff.update_layout(
-        title=f"A - B (ROI) | mean={diff_roi.mean():.3f}, std={diff_roi.std():.3f}",
-        xaxis_title="X (ROI)", yaxis_title="Y (ROI)",
-        yaxis=dict(autorange="reversed"),
-        height=400,
-    )
-    st.plotly_chart(fig_diff, use_container_width=True)
+            # --- Histogram from precomputed data ---
+            st.subheader("ROI Intensity Histogram (Bright A)")
+            hist_counts = fe["hist_counts"]
+            hist_edges = fe["hist_edges"]
+            # Use bar chart with precomputed histogram
+            bin_centers = [(hist_edges[i] + hist_edges[i + 1]) / 2 for i in range(len(hist_counts))]
+            fig_hist = go.Figure()
+            fig_hist.add_trace(go.Bar(
+                x=bin_centers, y=hist_counts,
+                marker_color="steelblue", name="Pixel counts",
+                width=1.0,
+            ))
+            fig_hist.add_vline(x=0, line_dash="dot", line_color="blue",
+                               annotation_text="Floor (0)")
+            fig_hist.add_vline(x=ADU_MAX, line_dash="dot", line_color="red",
+                               annotation_text="Clamp (255)")
+            fig_hist.update_layout(
+                title=f"ROI Intensity Distribution (Bright A, {fe['label']})",
+                xaxis_title="Pixel Value (DN)", yaxis_title="Count",
+                height=350,
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
 
-    # --- PTC Pair Stats Card ---
+            # --- Diff stats (no image in demo) ---
+            st.subheader("Difference Image (A - B) Statistics")
+            st.markdown(
+                f"**ROI difference:** mean = {fe['diff_roi_mean']:.3f} DN, "
+                f"std = {fe['diff_roi_std']:.3f} DN"
+            )
+        else:
+            st.warning("No precomputed frame data available for this setting.")
+
+    # --- PTC Pair Stats Card (works in both modes) ---
     st.subheader("PTC Pair Statistics")
-
     var_display = all_variances[sel_idx]
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
     col_s1.metric("Mean Signal", f"{pd_pair['mean_signal']:.2f} DN")
@@ -1254,7 +1206,6 @@ def page_frame_explorer(settings: dict):
     intercept = fit_dict["intercept"]
 
     fig_mini = go.Figure()
-    # All points (faded)
     fig_mini.add_trace(go.Scatter(
         x=all_means[mask].tolist(), y=all_variances[mask].tolist(),
         mode="markers", name="Used",
@@ -1281,47 +1232,48 @@ def page_frame_explorer(settings: dict):
         x=[float(all_means[sel_idx])],
         y=[float(all_variances[sel_idx])],
         mode="markers",
-        name=f"Current: {fp.label}",
+        name=f"Current: {labels[sel_idx]}",
         marker=dict(color="gold", size=14, symbol="star",
                     line=dict(color="black", width=1.5)),
     ))
     fig_mini.add_vline(x=ADU_MAX, line_dash="dot", line_color="gray")
     fig_mini.update_layout(
-        title=f"PTC (highlighted: {fp.label})",
+        title=f"PTC (highlighted: {labels[sel_idx]})",
         xaxis_title="Mean Signal (DN)", yaxis_title="Variance (DN^2)",
         height=380, showlegend=True,
         legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     )
     st.plotly_chart(fig_mini, use_container_width=True)
 
-    # --- Bias Comparison (local vs global) ---
-    if not settings["is_gain_sweep"] and has_dark and GLOBAL_BIAS_PATHS[0].exists():
-        st.subheader("Bias Comparison: Local Dark vs Global Bias")
-        # Local dark bias result (already computed in the current analysis)
-        local_bias = make_master_bias([fp.dark_a, fp.dark_b])
-        pr_local = mean_var_from_pair(fp.bright_a, fp.bright_b, local_bias, roi)
+    # --- Bias Comparison (local vs global) -- live mode only ---
+    if LIVE_MODE and not settings["is_gain_sweep"]:
+        fp = flat_pairs[sel_idx]
+        has_dark = fp.dark_a is not None and fp.dark_b is not None
+        if has_dark and GLOBAL_BIAS_PATHS[0].exists():
+            st.subheader("Bias Comparison: Local Dark vs Global Bias")
+            local_bias = make_master_bias([fp.dark_a, fp.dark_b])
+            pr_local = mean_var_from_pair(fp.bright_a, fp.bright_b, local_bias, roi)
 
-        # Global bias result
-        global_bias = make_master_bias(GLOBAL_BIAS_PATHS)
-        pr_global = mean_var_from_pair(fp.bright_a, fp.bright_b, global_bias, roi)
+            global_bias = make_master_bias(GLOBAL_BIAS_PATHS)
+            pr_global = mean_var_from_pair(fp.bright_a, fp.bright_b, global_bias, roi)
 
-        bias_rows = [
-            {
-                "Bias Method": "Local dark pair",
-                "Mean Signal (DN)": round(pr_local.mean_signal, 2),
-                "Variance (DN^2)": round(pr_local.variance, 2),
-                "Sat Hi (%)": round(pr_local.sat_hi * 100, 2),
-                "Sat Lo (%)": round(pr_local.sat_lo * 100, 2),
-            },
-            {
-                "Bias Method": "Global master bias",
-                "Mean Signal (DN)": round(pr_global.mean_signal, 2),
-                "Variance (DN^2)": round(pr_global.variance, 2),
-                "Sat Hi (%)": round(pr_global.sat_hi * 100, 2),
-                "Sat Lo (%)": round(pr_global.sat_lo * 100, 2),
-            },
-        ]
-        st.dataframe(pd.DataFrame(bias_rows), use_container_width=True, hide_index=True)
+            bias_rows = [
+                {
+                    "Bias Method": "Local dark pair",
+                    "Mean Signal (DN)": round(pr_local.mean_signal, 2),
+                    "Variance (DN^2)": round(pr_local.variance, 2),
+                    "Sat Hi (%)": round(pr_local.sat_hi * 100, 2),
+                    "Sat Lo (%)": round(pr_local.sat_lo * 100, 2),
+                },
+                {
+                    "Bias Method": "Global master bias",
+                    "Mean Signal (DN)": round(pr_global.mean_signal, 2),
+                    "Variance (DN^2)": round(pr_global.variance, 2),
+                    "Sat Hi (%)": round(pr_global.sat_hi * 100, 2),
+                    "Sat Lo (%)": round(pr_global.sat_lo * 100, 2),
+                },
+            ]
+            st.dataframe(pd.DataFrame(bias_rows), use_container_width=True, hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1334,8 +1286,14 @@ def main():
         "All analysis in native DN (8-bit clamped at 255, no rescaling)"
     )
 
-    # Ensure FITS data is available (downloads on first cloud deployment run)
-    _ensure_data()
+    if not LIVE_MODE:
+        if not DEMO_DATA_PATH.exists():
+            st.error(
+                "FITS data files and demo_data.json not found. "
+                "Please run with local FITS data or ensure demo_data.json is present."
+            )
+            st.stop()
+        st.sidebar.success("Demo mode: precomputed results")
 
     settings = build_sidebar()
 

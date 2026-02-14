@@ -38,7 +38,7 @@
 ## Phase 3: Enhancements
 - [x] Page: PTC Theory & Derivation — full mathematical walkthrough, exposure sweep vs gain sweep comparison, clamp effects
 - [x] GitHub repo created — brycewilson27/PhotonTransferCurve (public, main branch)
-- [ ] Streamlit Cloud deployment (requires demo/fallback mode for missing FITS data)
+- [x] Streamlit Cloud deployment — auto-download from GitHub Releases, awaiting deploy at share.streamlit.io
 - [ ] Linearity analysis (mean signal vs exposure time)
 - [ ] DSNU / PRNU spatial maps
 - [ ] Per-pixel PTC histograms
@@ -127,3 +127,17 @@
 - Added Prompt 7 (Streamlit Cloud Deployment) to AGENT_PROMPTS.md
 - **Note**: FITS data files (~807 MB) excluded from repo — Streamlit Cloud deployment will need demo/fallback mode
 - **Next**: Deploy to Streamlit Cloud (use Prompt 7), or continue Phase 3 enhancements
+
+### Session 8 — 2026-02-13
+- **Streamlit Cloud deployment preparation**
+- Created zip archive of all FITS data (324 files, 806 MB -> 594 MB compressed)
+- Created GitHub Release `v1.0-data` with zip as asset: https://github.com/brycewilson27/PhotonTransferCurve/releases/tag/v1.0-data
+- Added auto-download logic to `app.py`: `_ensure_data()` downloads + extracts FITS data on first cloud run
+  - Detects missing `PhotonTransferCurveArtifacts/` directory
+  - Downloads 594 MB zip from GitHub Releases with progress bar
+  - Extracts to `PhotonTransferCurveArtifacts/`, cleans up zip
+  - Uses `st.rerun()` to reload app after extraction
+- Updated `.gitignore` to exclude `.zip` files
+- Verified app still works locally (HTTP 200 on localhost:9510)
+- Pushed to `main` branch
+- **Next**: Complete Streamlit Cloud deployment at https://share.streamlit.io, update with live URL
