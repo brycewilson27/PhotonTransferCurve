@@ -1,6 +1,6 @@
 # Project Progress
 
-## Status: Phase 3 In Progress — 6 Pages Built (Theory page added)
+## Status: Phase 3 In Progress — 6 Pages Built, GitHub repo live
 
 ---
 
@@ -37,6 +37,8 @@
 
 ## Phase 3: Enhancements
 - [x] Page: PTC Theory & Derivation — full mathematical walkthrough, exposure sweep vs gain sweep comparison, clamp effects
+- [x] GitHub repo created — brycewilson27/PhotonTransferCurve (public, main branch)
+- [ ] Streamlit Cloud deployment (requires demo/fallback mode for missing FITS data)
 - [ ] Linearity analysis (mean signal vs exposure time)
 - [ ] DSNU / PRNU spatial maps
 - [ ] Per-pixel PTC histograms
@@ -113,3 +115,15 @@
 - Added page to navigation as first item (educational reference)
 - App running on localhost:9501 — now has 6 pages total
 - **Next**: Remaining Phase 3 enhancements or user testing
+
+### Session 7 — 2026-02-13
+- Created `.gitignore` (excludes FITS data, __pycache__, IDE files, .streamlit/)
+- Installed GitHub CLI (`gh`) via winget
+- Authenticated `gh` as `brycewilson27` via browser device flow
+- Configured git user identity (brycewilson27)
+- Initialized git repo, created initial commit (8 files, 2676 insertions)
+- Created public GitHub repo: https://github.com/brycewilson27/PhotonTransferCurve
+- Pushed to `main` branch successfully
+- Added Prompt 7 (Streamlit Cloud Deployment) to AGENT_PROMPTS.md
+- **Note**: FITS data files (~807 MB) excluded from repo — Streamlit Cloud deployment will need demo/fallback mode
+- **Next**: Deploy to Streamlit Cloud (use Prompt 7), or continue Phase 3 enhancements

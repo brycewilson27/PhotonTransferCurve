@@ -4,7 +4,7 @@ Use these prompts to quickly re-establish context when starting a new conversati
 
 **IMPORTANT**: Copy the prompt text (inside the ``` blocks) and paste it as your first message to a new Claude Code agent.
 
-**Current status: Phase 3 IN PROGRESS. Theory page done. Use Prompt 3 to continue enhancements.**
+**Current status: Phase 3 IN PROGRESS. Theory page done. GitHub repo created (brycewilson27/PhotonTransferCurve). Use Prompt 7 for Streamlit Cloud deployment, or Prompt 3 to continue enhancements.**
 
 ---
 
@@ -222,6 +222,65 @@ Question: [ask your specific question about clamp effects]
 
 ---
 
+## Prompt 7: Deploy to Streamlit Cloud
+
+```
+I need to deploy a Photon Transfer Curve (PTC) analysis Streamlit app to Streamlit Cloud.
+
+Working directory: C:\Users\Bryce Wilson\Documents\PhotonTransferCurve
+
+**Read these files first:**
+1. `PROGRESS.md` — current status (READ THIS FIRST)
+2. `app.py` — the Streamlit app entry point
+3. `requirements.txt` — dependencies
+
+**GitHub repo:** https://github.com/brycewilson27/PhotonTransferCurve
+- Branch: `main`
+- Already pushed with: app.py, ptc_analysis.py, requirements.txt, .gitignore, and all .md docs
+- FITS data files are excluded via .gitignore (too large for GitHub)
+
+**Deployment info:**
+- GitHub username: `brycewilson27`
+- Git credentials: configured via Windows credential manager
+- GitHub CLI (`gh`): installed at `C:\Program Files\GitHub CLI\gh.exe`, authenticated
+- Entry point: `app.py`
+- Dependencies: astropy, numpy, scipy, streamlit, plotly, pandas (in requirements.txt)
+
+**IMPORTANT: Data files are NOT in the repo.**
+The FITS data files (~807 MB) are excluded from GitHub. The Streamlit Cloud deployment will NOT have access to the raw FITS data. Options to handle this:
+1. **Demo mode**: Add sample/precomputed data so the app works without FITS files (recommended)
+2. **Cloud storage**: Upload FITS to S3/GCS and download at runtime
+3. **Git LFS**: Use Git Large File Storage (has bandwidth limits on free tier)
+4. **Graceful fallback**: App detects missing data and shows a message explaining this is a local-data tool
+
+**Streamlit Cloud deployment steps:**
+1. Go to https://share.streamlit.io
+2. Sign in with GitHub account (brycewilson27)
+3. Click "New app"
+4. Select repo: `brycewilson27/PhotonTransferCurve`
+5. Branch: `main`
+6. Main file path: `app.py`
+7. Click "Deploy"
+8. Auto-deploys on every push to main
+
+**Git workflow for updates:**
+```bash
+cd "C:/Users/Bryce Wilson/Documents/PhotonTransferCurve"
+git add app.py ptc_analysis.py requirements.txt
+git commit -m "description of changes"
+git push origin main
+# Streamlit Cloud auto-redeploys
+```
+
+**After deploying, update:**
+- `PROGRESS.md`: Add deployment session log entry with the Streamlit Cloud URL
+- `AGENT_PROMPTS.md`: Add the live URL to the project info
+
+Task: [describe what you need — e.g., "set up demo mode for cloud deployment", "add graceful fallback when data is missing", "troubleshoot deployment error"]
+```
+
+---
+
 ## Tips for Context Efficiency
 
 1. **Always read PROGRESS.md first** — it tells you exactly where things stand
@@ -234,3 +293,6 @@ Question: [ask your specific question about clamp effects]
 8. **FITS files are large (~3.2MB each uncompressed)** — don't read them all; sample one per subfolder
 9. **Windows environment** — Python 3.10, ASCII-only console output, use pathlib for paths
 10. **Streamlit caching** — `@st.cache_data` needs plain dicts with `.tolist()` for numpy arrays, not dataclasses
+11. **GitHub repo** — `brycewilson27/PhotonTransferCurve`, push with `git push origin main`. FITS data excluded via .gitignore.
+12. **GitHub CLI** — installed at `C:\Program Files\GitHub CLI\gh.exe`, authenticated as `brycewilson27`. Use full path or add to PATH.
+13. **Streamlit Cloud** — auto-deploys from `main` branch. The app needs FITS data locally — cloud deployment requires a demo/fallback mode.
