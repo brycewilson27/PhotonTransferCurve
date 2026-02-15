@@ -25,6 +25,7 @@ from ptc_analysis import (
     ADU_MAX,
     DEFAULT_ROI,
     DEFAULT_SAT_THRESH,
+    EMVA_SPEC,
     apply_quantization_correction,
 )
 
@@ -76,7 +77,9 @@ if LIVE_MODE:
     from astropy.io import fits
 
     from ptc_analysis import (
+        analyze_gain_sweep_per_point,
         collect_flat_pairs,
+        fit_gain_model,
         load_fits_image,
         make_master_bias,
         mean_var_from_pair,
@@ -227,6 +230,70 @@ def get_demo_sweep(settings: dict) -> dict:
     return demo[key]
 
 
+@st.cache_data(show_spinner="Running per-point gain analysis...")
+def cached_gain_per_point(
+    sweep_folder: str,
+    roi: tuple[int, int, int, int],
+    sigma_read_e_anchor: float,
+    apply_quant: bool,
+    sat_thresh: float,
+) -> tuple[list[dict], dict]:
+    """Run per-point gain analysis and gain model fit, return serializable dicts."""
+    gp_results = analyze_gain_sweep_per_point(
+        sweep_folder=Path(sweep_folder),
+        roi=roi,
+        sigma_read_e_anchor=sigma_read_e_anchor,
+        apply_quant_corr=apply_quant,
+    )
+    per_point = []
+    for gp in gp_results:
+        per_point.append({
+            "gain_db": gp.gain_db,
+            "mean_signal": float(gp.mean_signal),
+            "pair_variance": float(gp.pair_variance),
+            "K_apparent": float(gp.K_apparent) if np.isfinite(gp.K_apparent) else None,
+            "K_true": float(gp.K_true) if np.isfinite(gp.K_true) else None,
+            "dark_pair_variance": float(gp.dark_pair_variance),
+            "read_noise_dn": float(gp.read_noise_dn),
+            "read_noise_e": float(gp.read_noise_e) if np.isfinite(gp.read_noise_e) else None,
+            "n_electrons": float(gp.n_electrons) if np.isfinite(gp.n_electrons) else None,
+            "sat_hi": float(gp.sat_hi),
+            "sat_lo": float(gp.sat_lo),
+            "gain_mode": gp.gain_mode,
+        })
+    gm = fit_gain_model(gp_results, sat_thresh=sat_thresh)
+    model_dict = {
+        "K_0": float(gm.K_0),
+        "dB_per_decade": float(gm.dB_per_decade),
+        "dB_per_doubling": float(gm.dB_per_doubling),
+        "scale_factor": float(gm.scale_factor),
+        "r_squared": float(gm.r_squared),
+        "n_points_used": gm.n_points_used,
+        "gain_range": list(gm.gain_range),
+        "sigma_read_e_mean": float(gm.sigma_read_e_mean),
+    }
+    return per_point, model_dict
+
+
+def get_gain_analysis(settings: dict, exposure_fit: dict | None = None) -> tuple[list[dict], dict]:
+    """Get per-point gain analysis and model -- live or demo."""
+    if LIVE_MODE:
+        # Use exposure sweep read_noise_e as anchor; fall back to 2.78
+        anchor = 2.78
+        if exposure_fit is not None:
+            anchor = exposure_fit.get("read_noise_e", 2.78)
+        return cached_gain_per_point(
+            sweep_folder=str(settings["sweep_folder"]),
+            roi=settings["roi"],
+            sigma_read_e_anchor=anchor,
+            apply_quant=settings["apply_quant"],
+            sat_thresh=settings["sat_thresh"],
+        )
+    else:
+        sweep_data = get_demo_sweep(settings)
+        return sweep_data["per_point_analysis"], sweep_data["gain_model"]
+
+
 # ---------------------------------------------------------------------------
 # Helper: build a DataFrame from pair results
 # ---------------------------------------------------------------------------
@@ -286,9 +353,11 @@ def page_sensor_overview(settings: dict):
     with col2:
         st.subheader("Sensor Specifications")
         st.markdown("**Sensor:** AstroTracker CMOS star tracker")
+        st.markdown(f"**Underlying sensor:** {EMVA_SPEC['sensor_model']} ({EMVA_SPEC['sensor_type']})")
+        st.markdown(f"**Pixel size:** {EMVA_SPEC['pixel_size_um']} um | **Diagonal:** {EMVA_SPEC['diagonal_mm']} mm")
         st.markdown("**Native ADC:** 12-bit (0-4095 DN)")
         st.markdown("**Stored format:** 8-bit via CLAMP (0-255 DN)")
-        st.markdown("**Image size:** 2064 x 1552 pixels")
+        st.markdown(f"**Image size:** {EMVA_SPEC['resolution']} pixels")
         st.markdown("**Key:** 1 stored DN = 1 native DN (clamped, not rescaled)")
 
         if LIVE_MODE and flat_pairs:
@@ -311,6 +380,97 @@ def page_sensor_overview(settings: dict):
             if "header_text" in sweep_data:
                 st.markdown("**FITS Header (sample):**")
                 st.code(sweep_data["header_text"], language="text")
+
+    # --- EMVA 1288 Reference Specifications ---
+    st.markdown("---")
+    st.subheader("EMVA 1288 Reference Specifications")
+    st.markdown(
+        f"The **{EMVA_SPEC['sensor_model']}** has been independently characterized by "
+        f"**{EMVA_SPEC['test_lab']}** under the **{EMVA_SPEC['test_standard']}** standard "
+        f"at {EMVA_SPEC['test_illumination']}, {EMVA_SPEC['test_temperature_C']}C. "
+        "Two operating points are reported: **Low Conversion Gain (LCG)** at 0 dB analog gain, "
+        "and **High Conversion Gain (HCG)** at 3 dB analog gain. Both use 12-bit ADC output."
+    )
+
+    lcg = EMVA_SPEC["LCG"]
+    hcg = EMVA_SPEC["HCG"]
+
+    spec_df = pd.DataFrame({
+        "Parameter": [
+            "Analog Gain",
+            "Conversion Gain Mode",
+            "System Gain K (DN/e-)",
+            "Conversion Gain 1/K (e-/DN)",
+            "Quantum Efficiency (%)",
+            "Read Noise (e- rms)",
+            "Read Noise (DN rms)",
+            "Full Well Capacity (e-)",
+            "SNR_max",
+            "Dynamic Range (dB)",
+            "Dynamic Range (bits)",
+            "DSNU (e-)",
+            "PRNU (%)",
+            "Linearity Error (%)",
+            "Black Level (DN)",
+        ],
+        "LCG (0 dB)": [
+            "0 dB",
+            "Low",
+            f"{lcg['K_dn_per_e']:.3f}",
+            f"{lcg['conv_gain_e_per_dn']:.3f}",
+            f"{lcg['qe_percent']:.2f}",
+            f"{lcg['read_noise_e']:.3f}",
+            f"{lcg['read_noise_dn']:.3f}",
+            f"{lcg['fwc_e']:,}",
+            f"{lcg['snr_max']} ({lcg['snr_max_db']:.1f} dB)",
+            f"{lcg['dynamic_range_db']:.1f}",
+            f"{lcg['dynamic_range_bits']:.1f}",
+            f"{lcg['dsnu_e']:.1f}",
+            f"{lcg['prnu_percent']:.1f}",
+            f"{lcg['linearity_error_min_pct']:.3f} to {lcg['linearity_error_max_pct']:.3f}",
+            f"{lcg['black_level_dn']}",
+        ],
+        "HCG (3 dB)": [
+            "3 dB",
+            "High",
+            f"{hcg['K_dn_per_e']:.3f}",
+            f"{hcg['conv_gain_e_per_dn']:.3f}",
+            f"{hcg['qe_percent']:.2f}",
+            f"{hcg['read_noise_e']:.3f}",
+            f"{hcg['read_noise_dn']:.3f}",
+            f"{hcg['fwc_e']:,}",
+            f"{hcg['snr_max']} ({hcg['snr_max_db']:.1f} dB)",
+            f"{hcg['dynamic_range_db']:.1f}",
+            f"{hcg['dynamic_range_bits']:.1f}",
+            f"{hcg['dsnu_e']:.1f}",
+            f"{hcg['prnu_percent']:.1f}",
+            f"{hcg['linearity_error_min_pct']:.3f} to {hcg['linearity_error_max_pct']:.3f}",
+            f"{hcg['black_level_dn']}",
+        ],
+    })
+    st.dataframe(spec_df, use_container_width=True, hide_index=True)
+
+    with st.expander("How do these specs relate to our measurements?"):
+        st.markdown(
+            "The EMVA 1288 specs characterize the **bare sensor** at low analog gain "
+            "(0 or 3 dB) with **12-bit output**. Our AstroTracker operates at **90 dB "
+            "analog gain** with **8-bit clamped output**, which creates key differences:\n\n"
+            "- **System gain K** is much higher in our setup (3.13 DN/e- at 90 dB vs "
+            "0.40 DN/e- at 0 dB) because analog gain amplifies the signal before digitization.\n"
+            "- **FWC appears tiny** in our data (81 e-) because the 8-bit clamp at 255 DN "
+            "cuts off the signal far before the sensor's true ~9,500 e- well fills. "
+            "The true FWC is only accessible with 12-bit unclamped data.\n"
+            "- **Read noise in electrons** is comparable (2.78 e- at 90 dB vs 1.95-5.56 e- "
+            "in the spec), which makes physical sense -- read noise originates at the pixel "
+            "level before amplification.\n"
+            "- **Quantum efficiency** (~90%) is an intrinsic pixel property and does not depend "
+            "on gain or bit depth. We cannot measure QE from our PTC (it requires a calibrated "
+            "light source).\n\n"
+            "The gain architecture has two layers: a **hardware conversion gain mode** "
+            "(LCG/HCG, which changes pixel capacitance) and an **analog gain amplifier** "
+            "(the dB setting). Our 90 dB setting applies high amplification on top of "
+            "whichever CG mode the AstroTracker firmware selects."
+        )
 
     # Sample image with ROI overlay
     st.subheader("Sample Image with ROI Overlay")
@@ -478,6 +638,64 @@ def page_ptc_analysis(settings: dict):
         "data to measure."
     )
 
+    # --- EMVA 1288 Spec Comparison ---
+    if not settings["is_gain_sweep"]:
+        st.markdown("---")
+        st.subheader("Comparison with EMVA 1288 Spec Values")
+        st.markdown(
+            "Side-by-side comparison of our PTC-measured values (90 dB gain, 8-bit clamp) "
+            "against the manufacturer EMVA 1288 specs (0-3 dB gain, 12-bit output)."
+        )
+
+        lcg = EMVA_SPEC["LCG"]
+        hcg = EMVA_SPEC["HCG"]
+        cmp_df = pd.DataFrame({
+            "Metric": [
+                "System Gain K (DN/e-)",
+                "Conversion Gain (e-/DN)",
+                "Read Noise (e- rms)",
+                "Read Noise (DN rms)",
+                "Full Well Capacity (e-)",
+                "Dynamic Range (dB)",
+                "SNR_max",
+            ],
+            "Our PTC (90 dB, 8-bit)": [
+                f"{fit_dict['K_slope']:.4f}",
+                f"{fit_dict['conversion_gain']:.3f}",
+                f"{fit_dict['read_noise_e']:.2f}",
+                f"{fit_dict['read_noise_dn']:.2f}",
+                f"{fit_dict['fwc_e']:.0f} (clamp-limited)",
+                f"{fit_dict['dynamic_range_db']:.1f}",
+                f"{fit_dict['snr_max']:.1f}",
+            ],
+            "Spec LCG (0 dB, 12-bit)": [
+                f"{lcg['K_dn_per_e']:.4f}",
+                f"{lcg['conv_gain_e_per_dn']:.3f}",
+                f"{lcg['read_noise_e']:.3f}",
+                f"{lcg['read_noise_dn']:.3f}",
+                f"{lcg['fwc_e']:,}",
+                f"{lcg['dynamic_range_db']:.1f}",
+                f"{lcg['snr_max']}",
+            ],
+            "Spec HCG (3 dB, 12-bit)": [
+                f"{hcg['K_dn_per_e']:.4f}",
+                f"{hcg['conv_gain_e_per_dn']:.3f}",
+                f"{hcg['read_noise_e']:.3f}",
+                f"{hcg['read_noise_dn']:.3f}",
+                f"{hcg['fwc_e']:,}",
+                f"{hcg['dynamic_range_db']:.1f}",
+                f"{hcg['snr_max']}",
+            ],
+        })
+        st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+
+        st.info(
+            "**Why the big differences?** Our 90 dB analog gain amplifies the signal ~7.8x more than "
+            "HCG mode (K=3.13 vs 0.40 DN/e-). The 8-bit clamp at 255 DN then limits the measurable "
+            "FWC to just 81 e-. The spec's true FWC of ~9,500 e- (LCG) is only accessible "
+            "with 12-bit unclamped output at low gain."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Page: Sensor Metrics Dashboard
@@ -514,6 +732,41 @@ def page_metrics_dashboard(settings: dict):
     c6.metric("Intercept", f"{fit_dict['intercept']:.2f} DN^2")
     c7.metric("Read Noise (DN)", f"{fit_dict['read_noise_dn']:.2f} DN rms")
     c8.metric("R-squared", f"{fit_dict['r_squared']:.6f}")
+
+    # --- EMVA 1288 Spec Comparison on Metrics Dashboard ---
+    if not settings["is_gain_sweep"]:
+        st.markdown("---")
+        st.subheader("EMVA 1288 Spec Comparison")
+
+        lcg = EMVA_SPEC["LCG"]
+        hcg = EMVA_SPEC["HCG"]
+
+        # Show measured vs spec as metric cards with deltas
+        st.markdown("**Our PTC vs manufacturer specs** (deltas show our value relative to spec):")
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.metric(
+            "K (DN/e-)",
+            f"{fit_dict['K_slope']:.3f}",
+            delta=f"{fit_dict['K_slope'] - hcg['K_dn_per_e']:+.3f} vs HCG spec",
+            delta_color="off",
+        )
+        sc2.metric(
+            "Read Noise (e-)",
+            f"{fit_dict['read_noise_e']:.2f}",
+            delta=f"{fit_dict['read_noise_e'] - hcg['read_noise_e']:+.2f} vs HCG spec",
+            delta_color="off",
+        )
+        sc3.metric(
+            "FWC (e-)",
+            f"{fit_dict['fwc_e']:.0f}",
+            delta=f"vs {lcg['fwc_e']:,} e- true spec (LCG)",
+            delta_color="off",
+        )
+        st.caption(
+            "Deltas are informational -- direct comparison is not meaningful because our "
+            "setup uses 90 dB analog gain + 8-bit clamp vs the spec's 0-3 dB gain + 12-bit output. "
+            "See the Sensor Overview page for the full EMVA 1288 spec table."
+        )
 
     st.markdown("---")
 
@@ -607,6 +860,29 @@ def page_gain_sweep(settings: dict):
                 dark_means.append(np.nan)
                 dark_stds.append(np.nan)
 
+    # --- Load per-point gain analysis ---
+    # Get exposure sweep fit for the sigma_read_e anchor
+    exposure_fit = None
+    if LIVE_MODE:
+        try:
+            exp_settings = dict(settings, is_gain_sweep=False,
+                                sweep_folder=SWEEP_DIRS["Exposure Sweep (90 dB gain)"])
+            exposure_fit, _ = run_analysis(exp_settings)
+        except Exception:
+            pass
+    else:
+        try:
+            demo = load_demo_data()
+            exposure_fit = demo["exposure_sweep"]["fit"]
+        except Exception:
+            pass
+
+    try:
+        per_point, gain_model = get_gain_analysis(settings, exposure_fit)
+    except Exception as exc:
+        st.warning(f"Per-point gain analysis unavailable: {exc}")
+        per_point, gain_model = [], {}
+
     # --- Overview metrics ---
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Gain Levels", f"{len(pair_dicts)}")
@@ -647,6 +923,277 @@ def page_gain_sweep(settings: dict):
         legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     )
     st.plotly_chart(fig_signal, use_container_width=True)
+
+    # === NEW GAIN ANALYSIS SECTIONS ===
+    if per_point and gain_model:
+        sat_thresh_val = settings["sat_thresh"]
+
+        # Filter to unsaturated points for plotting
+        pp_unsat = [p for p in per_point if p["sat_hi"] < sat_thresh_val
+                    and p.get("K_true") is not None]
+        pp_all_valid = [p for p in per_point if p.get("K_true") is not None]
+
+        # --- Section: System Gain (K) vs Analog Gain ---
+        st.markdown("---")
+        st.subheader("System Gain (K) vs Analog Gain")
+        st.markdown(
+            "Per-gain-level system gain estimates. **K_true** corrects for read-noise bias "
+            "using the quadratic PTC equation; **K_apparent** (naive variance/mean) is biased high."
+        )
+
+        fig_k = go.Figure()
+
+        # K_apparent (gray, all valid unsaturated)
+        fig_k.add_trace(go.Scatter(
+            x=[p["gain_db"] for p in pp_unsat],
+            y=[p["K_apparent"] for p in pp_unsat],
+            mode="markers",
+            name="K_apparent (biased)",
+            marker=dict(color="gray", size=7, symbol="diamond"),
+            hovertemplate="Gain: %{x} dB<br>K_app: %{y:.3f} DN/e-<extra></extra>",
+        ))
+
+        # K_true (blue, unsaturated)
+        fig_k.add_trace(go.Scatter(
+            x=[p["gain_db"] for p in pp_unsat],
+            y=[p["K_true"] for p in pp_unsat],
+            mode="markers",
+            name="K_true (corrected)",
+            marker=dict(color="dodgerblue", size=8),
+            hovertemplate="Gain: %{x} dB<br>K_true: %{y:.3f} DN/e-<extra></extra>",
+        ))
+
+        # Exponential model fit line
+        gm = gain_model
+        g_range = np.linspace(gm["gain_range"][0] - 5, gm["gain_range"][1] + 5, 200)
+        K_model = gm["K_0"] * 10.0 ** (g_range / gm["dB_per_decade"])
+        fig_k.add_trace(go.Scatter(
+            x=g_range.tolist(), y=K_model.tolist(),
+            mode="lines",
+            name=f"Model: K = {gm['K_0']:.2f} * 10^(g/{gm['dB_per_decade']:.0f})",
+            line=dict(color="orange", dash="dash", width=2),
+        ))
+
+        # ExposureSweep K reference star
+        exp_K = exposure_fit["K_slope"] if exposure_fit else 3.13
+        fig_k.add_trace(go.Scatter(
+            x=[90], y=[exp_K],
+            mode="markers",
+            name=f"ExposureSweep K = {exp_K:.2f}",
+            marker=dict(color="gold", size=14, symbol="star",
+                        line=dict(color="black", width=1.5)),
+        ))
+
+        fig_k.update_layout(
+            title="System Gain K vs Analog Gain",
+            xaxis_title="Analog Gain (dB)",
+            yaxis_title="K (DN/e-)",
+            yaxis=dict(type="log"),
+            height=500,
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+        )
+        st.plotly_chart(fig_k, use_container_width=True)
+
+        # Metric cards
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("K_0 (at 0 dB)", f"{gm['K_0']:.4f} DN/e-")
+        mc2.metric("dB per decade", f"{gm['dB_per_decade']:.1f}")
+        mc3.metric("dB per doubling", f"{gm['dB_per_doubling']:.1f}")
+        mc4.metric("Model R^2", f"{gm['r_squared']:.4f}")
+
+        with st.expander("How is K_true computed?"):
+            st.markdown(
+                "**K_apparent** = variance / mean overestimates K because the variance "
+                "includes read noise. At 90 dB, this overestimate is ~28%.\n\n"
+                "**K_true** solves the full single-point PTC equation:\n"
+            )
+            st.latex(r"\mathrm{Var} = K \cdot \bar{S} + K^2 \cdot \sigma_{\mathrm{read},e^-}^2")
+            st.markdown("Rearranging as a quadratic in K:")
+            st.latex(r"K^2 \cdot \sigma_{\mathrm{read},e^-}^2 + K \cdot \bar{S} - \mathrm{Var} = 0")
+            st.markdown("Taking the positive root:")
+            st.latex(
+                r"K_{\mathrm{true}} = \frac{-\bar{S} + \sqrt{\bar{S}^2 + "
+                r"4\,\sigma_{\mathrm{read},e^-}^2 \cdot \mathrm{Var}}}"
+                r"{2\,\sigma_{\mathrm{read},e^-}^2}"
+            )
+            anchor_val = exposure_fit.get("read_noise_e", 2.78) if exposure_fit else 2.78
+            st.markdown(
+                f"The anchor value **sigma_read_e = {anchor_val:.2f} e-** comes from the "
+                "ExposureSweep PTC y-intercept (the read noise from the full multi-point fit)."
+            )
+
+        # --- Section: Read Noise vs Analog Gain ---
+        st.markdown("---")
+        st.subheader("Read Noise vs Analog Gain")
+        st.markdown(
+            "Read noise measured from dark pair differences. In DN, it grows with gain "
+            "(amplified fixed noise). In electrons (input-referred), it stays flat -- "
+            "showing the constant noise floor of the readout electronics."
+        )
+
+        fig_rn = go.Figure()
+
+        # Read noise in DN (growing)
+        rn_gains = [p["gain_db"] for p in pp_unsat]
+        rn_dn = [p["read_noise_dn"] for p in pp_unsat]
+        rn_e = [p["read_noise_e"] for p in pp_unsat]
+
+        fig_rn.add_trace(go.Scatter(
+            x=rn_gains, y=rn_dn,
+            mode="markers+lines", name="Read Noise (DN)",
+            marker=dict(color="steelblue", size=7),
+            hovertemplate="Gain: %{x} dB<br>RN: %{y:.2f} DN<extra></extra>",
+        ))
+        fig_rn.add_trace(go.Scatter(
+            x=rn_gains, y=rn_e,
+            mode="markers+lines", name="Read Noise (e-)",
+            marker=dict(color="coral", size=7, symbol="triangle-up"),
+            line=dict(dash="dash"),
+            hovertemplate="Gain: %{x} dB<br>RN: %{y:.2f} e-<extra></extra>",
+        ))
+
+        # Mean sigma_read_e annotation
+        fig_rn.add_hline(
+            y=gm["sigma_read_e_mean"], line_dash="dot", line_color="coral",
+            annotation_text=f"mean = {gm['sigma_read_e_mean']:.2f} e-",
+            annotation_position="top right",
+        )
+
+        fig_rn.update_layout(
+            title="Read Noise vs Analog Gain (Dark Pair-Difference Method)",
+            xaxis_title="Analog Gain (dB)",
+            yaxis_title="Read Noise",
+            height=450,
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+        )
+        st.plotly_chart(fig_rn, use_container_width=True)
+
+        with st.expander("Why is read noise in electrons constant?"):
+            st.markdown(
+                "Read noise originates in the readout electronics **before** the analog gain "
+                "amplifier. When measured in electrons (input-referred), it reflects the "
+                "intrinsic noise floor of the pixel and is independent of gain.\n\n"
+                "In DN (output-referred), read noise grows with gain because the amplifier "
+                "scales both signal and noise equally.\n\n"
+                f"**Dark pair-diff read noise:** {gm['sigma_read_e_mean']:.2f} e- "
+                f"(mean across {gm['n_points_used']} unsaturated gains)\n\n"
+                f"**PTC intercept read noise:** "
+                f"{exposure_fit.get('read_noise_e', 2.78) if exposure_fit else 2.78:.2f} e- "
+                "(from ExposureSweep fit)\n\n"
+                "The dark pair-diff value is lower because it measures only the temporal "
+                "readout noise floor, while the PTC intercept includes additional constant "
+                "noise sources (e.g., low-level PRNU residuals, ADC non-linearity)."
+            )
+
+        # --- Section: Electron Count Consistency Check ---
+        st.markdown("---")
+        st.subheader("Electron Count Consistency Check")
+        st.markdown(
+            "With fixed illumination (10 ms), every gain level should collect the same "
+            "number of photoelectrons. This is the key self-consistency check."
+        )
+
+        ne_gains = [p["gain_db"] for p in pp_unsat if p.get("n_electrons") is not None]
+        ne_vals = [p["n_electrons"] for p in pp_unsat if p.get("n_electrons") is not None]
+
+        if ne_vals:
+            ne_mean = float(np.mean(ne_vals))
+            ne_std = float(np.std(ne_vals))
+            ne_cv = 100.0 * ne_std / ne_mean if ne_mean > 0 else 0
+
+            fig_ne = go.Figure()
+            fig_ne.add_trace(go.Scatter(
+                x=ne_gains, y=ne_vals,
+                mode="markers",
+                name="n_electrons",
+                marker=dict(color="mediumseagreen", size=9),
+                hovertemplate="Gain: %{x} dB<br>n_e: %{y:.1f} e-<extra></extra>",
+            ))
+
+            # Mean +/- std band
+            fig_ne.add_hrect(
+                y0=ne_mean - ne_std, y1=ne_mean + ne_std,
+                fillcolor="mediumseagreen", opacity=0.15,
+                line_width=0,
+                annotation_text=f"mean = {ne_mean:.1f} +/- {ne_std:.1f} e-",
+                annotation_position="top right",
+            )
+            fig_ne.add_hline(y=ne_mean, line_dash="dash", line_color="green")
+
+            fig_ne.update_layout(
+                title="Electron Count vs Analog Gain (Unsaturated Points Only)",
+                xaxis_title="Analog Gain (dB)",
+                yaxis_title="Electrons (e-)",
+                height=420,
+            )
+            st.plotly_chart(fig_ne, use_container_width=True)
+
+            nc1, nc2, nc3 = st.columns(3)
+            nc1.metric("Mean Electron Count", f"{ne_mean:.1f} e-")
+            nc2.metric("Std Dev", f"{ne_std:.1f} e-")
+            nc3.metric("CV", f"{ne_cv:.1f}%")
+
+            st.markdown(
+                "A low CV (< 10%) confirms that the gain correction is working correctly "
+                "and the illumination is indeed constant across the sweep. Saturated points "
+                "(> 150 dB) are excluded because clamp compression inflates the apparent electron count."
+            )
+
+        # --- Section: dB Scale Calibration ---
+        st.markdown("---")
+        st.subheader("dB Scale Calibration")
+        st.markdown(
+            "The AstroTracker uses a proprietary dB scale. This table maps AstroTracker dB "
+            "to equivalent standard voltage dB and the predicted system gain K."
+        )
+
+        cal_rows = []
+        for g_db in [0, 30, 50, 70, 90, 110, 130, 150]:
+            std_db = g_db / gm["scale_factor"]
+            K_pred = gm["K_0"] * 10.0 ** (g_db / gm["dB_per_decade"])
+            cal_rows.append({
+                "AstroTracker (dB)": g_db,
+                "Std Voltage (dB)": round(std_db, 1),
+                "Predicted K (DN/e-)": round(K_pred, 4),
+            })
+
+        # Add EMVA spec reference rows
+        cal_rows.append({
+            "AstroTracker (dB)": "EMVA LCG (0 dB)",
+            "Std Voltage (dB)": 0.0,
+            "Predicted K (DN/e-)": EMVA_SPEC["LCG"]["K_dn_per_e"],
+        })
+        cal_rows.append({
+            "AstroTracker (dB)": "EMVA HCG (3 dB)",
+            "Std Voltage (dB)": 3.0,
+            "Predicted K (DN/e-)": EMVA_SPEC["HCG"]["K_dn_per_e"],
+        })
+
+        cal_df = pd.DataFrame(cal_rows)
+        st.dataframe(cal_df, use_container_width=True, hide_index=True)
+
+        st.markdown(
+            f"**K_0 = {gm['K_0']:.2f} DN/e-** falls between EMVA LCG "
+            f"({EMVA_SPEC['LCG']['K_dn_per_e']:.3f}) and HCG "
+            f"({EMVA_SPEC['HCG']['K_dn_per_e']:.3f}), with ratios "
+            f"{gm['K_0'] / EMVA_SPEC['LCG']['K_dn_per_e']:.2f}x and "
+            f"{gm['K_0'] / EMVA_SPEC['HCG']['K_dn_per_e']:.2f}x respectively."
+        )
+
+        with st.expander("Are these real dB?"):
+            st.markdown(
+                "**No** -- AstroTracker dB is a proprietary register scale, not standard "
+                "voltage dB.\n\n"
+                f"- Standard voltage dB: **6.02 dB** doubles the voltage (and K)\n"
+                f"- AstroTracker dB: **{gm['dB_per_doubling']:.0f} dB** doubles K\n"
+                f"- Scale factor: **{gm['scale_factor']:.1f}x** "
+                f"(AstroTracker dB / standard voltage dB)\n\n"
+                f"So \"90 dB\" in AstroTracker terms is really only "
+                f"**{90 / gm['scale_factor']:.1f} standard voltage dB** "
+                "of actual amplification -- a factor of "
+                f"~{10.0 ** (90 / gm['dB_per_decade']):.1f}x, not the "
+                f"~{10.0 ** (90 / 20.0):.0f}x that 90 standard dB would imply."
+            )
 
     # --- 2. Dark Level (Black Level) ---
     if dark_means and not all(np.isnan(v) for v in dark_means):
@@ -781,6 +1328,12 @@ def page_gain_sweep(settings: dict):
     st.markdown("---")
     st.subheader("Per-Gain Summary Table")
 
+    # Build lookup from per-point analysis by gain_db
+    pp_lookup = {}
+    if per_point:
+        for pp in per_point:
+            pp_lookup[pp["gain_db"]] = pp
+
     rows = []
     for i, p in enumerate(pair_dicts):
         row = {
@@ -794,6 +1347,14 @@ def page_gain_sweep(settings: dict):
         if dark_means:
             row["Dark Mean (DN)"] = round(dark_means[i], 2) if not np.isnan(dark_means[i]) else "N/A"
             row["Dark Std (DN)"] = round(dark_stds[i], 2) if not np.isnan(dark_stds[i]) else "N/A"
+        # Per-point gain analysis columns
+        pp = pp_lookup.get(gain_nums[i])
+        if pp:
+            row["K_apparent (DN/e-)"] = round(pp["K_apparent"], 3) if pp.get("K_apparent") is not None else "-"
+            row["K_true (DN/e-)"] = round(pp["K_true"], 3) if pp.get("K_true") is not None else "-"
+            row["Read Noise (DN)"] = round(pp["read_noise_dn"], 2)
+            row["Read Noise (e-)"] = round(pp["read_noise_e"], 2) if pp.get("read_noise_e") is not None else "-"
+            row["n_electrons"] = round(pp["n_electrons"], 1) if pp.get("n_electrons") is not None else "-"
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -837,18 +1398,37 @@ def page_ptc_derivation(settings: dict):
     # ---- 2. Signal Chain Model ----
     st.subheader("2. Signal Chain Model")
     st.markdown(
-        "Light incident on a pixel generates photoelectrons. The analog-to-digital "
-        "converter (ADC) converts these electrons into Digital Numbers (DN). The "
-        "system gain **K** relates the two domains:"
+        "Light incident on a pixel generates photoelectrons. The electrons are converted "
+        "to voltage at the pixel's sense node, amplified by the **analog gain** stage, "
+        "then digitized by the ADC into Digital Numbers (DN). The system gain **K** "
+        "captures the entire chain:"
     )
+    st.latex(r"\mathrm{Photons} \xrightarrow{\mathrm{QE}} e^- \xrightarrow{\mathrm{pixel}} V "
+             r"\xrightarrow{\mathrm{gain}} V' \xrightarrow{\mathrm{ADC}} \mathrm{DN}")
     st.latex(r"S_{\mathrm{DN}} = K \cdot S_{e^-}")
     st.markdown("where:")
     st.markdown(
         "- $S_{\\mathrm{DN}}$ = signal in DN (digital numbers)\n"
         "- $S_{e^-}$ = signal in electrons\n"
-        "- $K$ = system gain (DN/e$^-$), the PTC slope\n"
+        "- $K$ = system gain (DN/e$^-$), the PTC slope -- **includes analog gain**\n"
         "- Conversion gain $g = 1/K$ (e$^-$/DN), the Janesick convention"
     )
+
+    with st.expander("Gain architecture of the IMX900"):
+        st.markdown(
+            "The **Sony IMX900** sensor has a **two-layer gain architecture**:\n\n"
+            "1. **Conversion Gain Mode (LCG/HCG)** -- A hardware switch at the pixel "
+            "that changes the capacitance of the sense node (charge-to-voltage conversion). "
+            "HCG mode produces ~4.2x more DN per electron than LCG at the same analog gain.\n\n"
+            "2. **Analog Gain (dB)** -- A programmable amplifier that scales the voltage "
+            "before the ADC. Higher dB = more amplification = more DN per electron.\n\n"
+            "The PTC-measured **K** bundles both layers together. At the spec's 0 dB (LCG), "
+            f"K = {EMVA_SPEC['LCG']['K_dn_per_e']} DN/e-. At 3 dB (HCG), "
+            f"K = {EMVA_SPEC['HCG']['K_dn_per_e']} DN/e-. Our AstroTracker "
+            "at 90 dB measures K = 3.13 DN/e-, reflecting the high amplification.\n\n"
+            "**For PTC analysis and simulation, K is all you need** -- you don't need to "
+            "know what fraction comes from conversion gain vs analog gain."
+        )
 
     st.markdown("**Noise sources in the signal chain:**")
     st.markdown(
@@ -1013,6 +1593,74 @@ def page_ptc_derivation(settings: dict):
         "The saturation threshold (adjustable in the sidebar) controls which pairs "
         "are excluded from the fit. Points in Zone 2 or 3 are rejected to keep the "
         "linear fit clean."
+    )
+
+    # ---- 8. Gain Sweep Analysis Method ----
+    st.subheader("8. Gain Sweep Analysis Method")
+    st.markdown(
+        "While a gain sweep cannot produce a valid multi-point PTC (because K changes at "
+        "each point), we can still extract K at **each gain level individually** using the "
+        "single-point PTC equation."
+    )
+
+    st.markdown("**The read-noise bias problem**")
+    st.markdown(
+        "The naive estimator K_apparent = variance / mean is biased high because "
+        "the variance includes read noise:"
+    )
+    st.latex(
+        r"\mathrm{Var} = K \cdot \bar{S} + K^2 \cdot \sigma_{\mathrm{read},e^-}^2 "
+        r"\;\;\Longrightarrow\;\; "
+        r"K_{\mathrm{apparent}} = \frac{\mathrm{Var}}{\bar{S}} = K + "
+        r"\frac{K^2 \cdot \sigma_{\mathrm{read},e^-}^2}{\bar{S}}"
+    )
+    st.markdown(
+        "At 90 dB this overestimate is ~28%. The bias is worse at higher gains "
+        "(larger K) and lower signal levels."
+    )
+
+    st.markdown("**Quadratic correction for K_true**")
+    st.markdown("Treating the single-point PTC equation as a quadratic in K:")
+    st.latex(
+        r"K^2 \cdot \sigma_{\mathrm{read},e^-}^2 + K \cdot \bar{S} "
+        r"- \mathrm{Var} = 0"
+    )
+    st.markdown("The positive root gives:")
+    st.latex(
+        r"K_{\mathrm{true}} = \frac{-\bar{S} + \sqrt{\bar{S}^2 + "
+        r"4\,\sigma_{\mathrm{read},e^-}^2 \cdot \mathrm{Var}}}"
+        r"{2\,\sigma_{\mathrm{read},e^-}^2}"
+    )
+    st.markdown(
+        "This requires an **anchor** value for the input-referred read noise "
+        "(sigma_read_e = 2.78 e-), obtained from the ExposureSweep PTC y-intercept."
+    )
+
+    st.markdown("**Exponential gain model**")
+    st.markdown("K_true grows exponentially with gain:")
+    st.latex(r"K(g) = K_0 \cdot 10^{g\,/\,c}")
+    st.markdown(
+        "where $g$ is AstroTracker dB and $c$ is the dB-per-decade constant. "
+        "Fitting in log space:"
+    )
+    st.latex(r"\log_{10}(K_{\mathrm{true}}) = a + b \cdot g")
+    st.markdown("Derived parameters:")
+    st.latex(r"K_0 = 10^a \qquad c = \frac{1}{b} \quad (\mathrm{dB\;per\;decade})")
+    st.latex(
+        r"\mathrm{dB\;per\;doubling} = \frac{\log_{10}(2)}{b} \qquad "
+        r"\mathrm{scale\;factor} = \frac{\mathrm{dB_{doubling}}}{6.02}"
+    )
+
+    st.markdown("**Key results:**")
+    st.markdown(
+        f"- K_0 = 1.19 DN/e- (extrapolated to 0 dB; between EMVA LCG = "
+        f"{EMVA_SPEC['LCG']['K_dn_per_e']:.3f} and HCG = "
+        f"{EMVA_SPEC['HCG']['K_dn_per_e']:.3f})\n"
+        "- dB per decade = 212.5, dB per doubling = 64.0\n"
+        "- AstroTracker dB is **proprietary**: ~10.6x standard voltage dB. "
+        "So 64 AstroTracker dB doubles K (vs 6.02 standard voltage dB).\n"
+        "- GAINMODE = 1 at all 24 gain levels, confirming a single CG configuration "
+        "across the sweep."
     )
 
     # ---- References ----

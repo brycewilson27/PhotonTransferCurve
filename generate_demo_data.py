@@ -5,6 +5,7 @@ from pathlib import Path
 from ptc_analysis import (
     collect_flat_pairs, run_ptc_analysis, apply_quantization_correction,
     load_fits_image, make_master_bias, mean_var_from_pair,
+    analyze_gain_sweep_per_point, fit_gain_model,
     DEFAULT_ROI, DEFAULT_SAT_THRESH, ADU_MAX
 )
 from astropy.io import fits as afits
@@ -160,6 +161,46 @@ if __name__ == "__main__":
     # Gain Sweep
     sweep_gain = base / "GainSweep_10msExpoTime"
     demo["gain_sweep"] = process_sweep(sweep_gain, None, "GainSweep", is_gain_sweep=True)
+
+    # Per-point gain analysis (uses ExposureSweep read_noise_e as anchor)
+    sigma_read_e_anchor = demo["exposure_sweep"]["fit"]["read_noise_e"]
+    print(f"\nRunning per-point gain analysis (anchor={sigma_read_e_anchor:.2f} e-)...")
+    gp_results = analyze_gain_sweep_per_point(
+        sweep_gain, roi, sigma_read_e_anchor=sigma_read_e_anchor, apply_quant_corr=True
+    )
+    per_point = []
+    for gp in gp_results:
+        per_point.append({
+            "gain_db": gp.gain_db,
+            "mean_signal": float(gp.mean_signal),
+            "pair_variance": float(gp.pair_variance),
+            "K_apparent": float(gp.K_apparent) if np.isfinite(gp.K_apparent) else None,
+            "K_true": float(gp.K_true) if np.isfinite(gp.K_true) else None,
+            "dark_pair_variance": float(gp.dark_pair_variance),
+            "read_noise_dn": float(gp.read_noise_dn),
+            "read_noise_e": float(gp.read_noise_e) if np.isfinite(gp.read_noise_e) else None,
+            "n_electrons": float(gp.n_electrons) if np.isfinite(gp.n_electrons) else None,
+            "sat_hi": float(gp.sat_hi),
+            "sat_lo": float(gp.sat_lo),
+            "gain_mode": gp.gain_mode,
+        })
+    demo["gain_sweep"]["per_point_analysis"] = per_point
+    print(f"  {len(per_point)} gain points processed")
+
+    # Gain model fit
+    gm = fit_gain_model(gp_results, sat_thresh=DEFAULT_SAT_THRESH)
+    demo["gain_sweep"]["gain_model"] = {
+        "K_0": float(gm.K_0),
+        "dB_per_decade": float(gm.dB_per_decade),
+        "dB_per_doubling": float(gm.dB_per_doubling),
+        "scale_factor": float(gm.scale_factor),
+        "r_squared": float(gm.r_squared),
+        "n_points_used": gm.n_points_used,
+        "gain_range": list(gm.gain_range),
+        "sigma_read_e_mean": float(gm.sigma_read_e_mean),
+    }
+    print(f"  Gain model: K_0={gm.K_0:.4f}, R^2={gm.r_squared:.6f}, "
+          f"{gm.n_points_used} points")
 
     # Metadata
     demo["metadata"] = {

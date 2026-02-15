@@ -280,3 +280,79 @@ Var(signal) = K * Mean(signal) + sigma²_read
 10. **Streamlit port conflicts on Windows** — multiple Streamlit instances may occupy ports 8501-8504. Use `netstat -ano | findstr ":850"` to find conflicts, or pick a higher port like 9501.
 11. **Exposure sweep PTC fit is rigorous; gain sweep fit is an approximation** — In an exposure sweep, K and sigma_read are constant across all data points, so the linear model `Var = K*Mean + b` is correct. In a gain sweep, both K and sigma_read change at every point (`Var_i = K_i*Mean_i + b_i`), violating the single-line assumption. The gain sweep overall fit gives an approximate average K but is not physically rigorous. See the "PTC Theory & Derivation" page in the app for the full mathematical comparison.
 12. **Streamlit `st.latex()` renders KaTeX** — use standard LaTeX math notation. Inline LaTeX in `st.markdown()` uses `$...$` syntax. For display equations use `st.latex()` which renders centered. Avoid `\text{}` with special characters; use `\mathrm{}` instead.
+13. **AstroTracker uses a proprietary dB gain scale** — the gain register (30-220 dB range) does NOT correspond to standard voltage dB (20*log10). It takes 64 AstroTracker dB to double K (vs 6.02 standard voltage dB), giving a scale factor of ~10.6x. This means 90 AstroTracker dB is equivalent to only ~8.5 standard voltage dB of amplification. The relationship is: `K(g) = K_0 * 10^(g / 212.5)` where g is in AstroTracker dB.
+14. **K_0 extrapolation falls between EMVA LCG and HCG** — extrapolating the gain model to 0 dB gives K_0 = 1.19 DN/e-, which is between the EMVA spec LCG (0.40 at 0 dB) and HCG (1.67 at 3 dB). This is expected because the AstroTracker operates with GAINMODE=1 throughout the sweep, which is a specific conversion gain configuration distinct from the FRAMOS test conditions (which used CG Low at 0 dB and CG High at 3 dB).
+
+---
+
+## Per-Point K Analysis (Gain Sweep, Session A)
+
+### K_apparent vs K_true: Read-Noise Bias Correction
+
+The naive single-point K estimate `K_apparent = variance / mean` is **biased high** because it attributes read noise variance to photon shot noise. The PTC equation at a single point is:
+
+```
+var = K * mean + K^2 * sigma_read_e^2
+```
+
+So `var / mean = K + K^2 * sigma_read_e^2 / mean`, which always exceeds K. The bias is proportional to `K^2 * sigma_read_e^2 / mean` — it's worst at high gain (large K) and low signal (small mean).
+
+**Correction method:** Solve the quadratic `K^2 * sigma_read_e^2 + K * mean - var = 0` for K:
+```
+K_true = (-mean + sqrt(mean^2 + 4 * sigma_read_e^2 * var)) / (2 * sigma_read_e^2)
+```
+
+**Measured bias at 90 dB gain:** K_apparent = 4.07 vs K_true = 3.19 — a **+28% overestimate**. The K_true value matches the exposure sweep fit K = 3.13 to within 1.9%.
+
+**Important:** The correction requires an anchor value for `sigma_read_e` (input-referred read noise in electrons). We use 2.78 e- from the exposure sweep PTC intercept. This is a reasonable assumption because input-referred read noise should be approximately constant across gain settings — it's a property of the readout electronics before amplification.
+
+### Dark Pair-Diff Read Noise vs PTC Intercept Read Noise
+
+Two independent methods to measure read noise:
+
+1. **PTC intercept method** (exposure sweep): fit `Var = K*Mean + b`, then `sigma_read_dn = sqrt(b)`. Gives 8.71 DN = 2.78 e- at 90 dB.
+
+2. **Dark pair-diff method** (per gain level): `sigma_read_dn = sqrt(0.5 * var(darkA - darkB))`. At 90 dB gain, this gives 4.34 DN = 1.36 e-.
+
+These two methods give **different results** because they measure different things:
+- The PTC intercept includes all noise sources that are constant across exposure times (true read noise + dark current shot noise + any residual FPN not cancelled by pair-diff).
+- The dark pair-diff isolates temporal noise in dark frames only, without any photon signal — it's a purer measure of the readout noise floor.
+
+The dark pair-diff value (1.36 e- at 90 dB) is closer to the EMVA spec read noise (1.95 e- HCG, 5.56 e- LCG at 12-bit). The mean across 16 unsaturated gain levels is 1.39 +/- 0.15 e-, remarkably consistent and suggesting the input-referred read noise is genuinely constant across the gain range.
+
+### n_electrons Self-Consistency Check
+
+At fixed illumination (10 ms, constant light source), the number of collected electrons should be constant regardless of analog gain. Our measurement confirms this: **n_electrons = 28.0 +/- 1.2 e- (CV = 4.2%)** across 16 unsaturated gain levels (30-140 dB). This validates:
+- The K_true correction is working correctly
+- The gain sweep data is internally consistent
+- The pair-difference variance method is robust across gain settings
+
+Saturation causes n_electrons to inflate above 150 dB (false signal from clamp compression), so these points must be excluded.
+
+### Saturation Onset in the Gain Sweep
+
+With 10 ms fixed exposure and ~28 electrons of signal:
+- **30-140 dB**: Unsaturated (sat_hi < 0.5%). K_true and n_electrons are reliable.
+- **150 dB**: Onset of saturation (sat_hi = 5%). Borderline — K_true still reasonable but starting to deviate.
+- **160-220 dB**: Heavily saturated. K_true, n_electrons, and read_noise_e are meaningless — the clamp crushes the signal distribution.
+
+The saturation threshold (0.5% of ROI pixels at 255) effectively separates clean from clamp-contaminated data.
+
+### Gain Model: K vs Gain (dB)
+
+The relationship between K_true and AstroTracker gain_dB is well-modeled by a log-linear (exponential) fit:
+
+```
+log10(K_true) = a + b * gain_dB
+K_true(g) = K_0 * 10^(g / dB_per_decade)
+```
+
+Fit results (16 unsaturated points, 30-140 dB, R^2 = 0.996):
+- K_0 = 1.19 DN/e- (extrapolated K at 0 AstroTracker dB)
+- dB_per_decade = 212.5 (AstroTracker dB for 10x K increase)
+- dB_per_doubling = 64.0 (AstroTracker dB for 2x K increase)
+- scale_factor = 10.63x (AstroTracker dB / standard voltage dB)
+
+**Key insight: proprietary dB scale.** The AstroTracker's gain register uses dB values that are ~10.6x larger than standard voltage dB. In standard electronics, doubling voltage gain requires 6.02 dB (= 20*log10(2)). In the AstroTracker system, doubling K requires 64 dB of register setting. This means the AstroTracker's "90 dB" is equivalent to only ~8.5 standard voltage dB of actual amplification.
+
+**K_0 vs EMVA reference specs.** The extrapolated K_0 = 1.19 DN/e- falls between the EMVA spec values at 0 dB: LCG = 0.40 (ratio 2.98x) and HCG = 1.67 (ratio 0.71x). The AstroTracker's GAINMODE=1 (constant across all gain levels) represents a specific conversion gain configuration that differs from both the FRAMOS LCG (CG Low) and HCG (CG High) test conditions.

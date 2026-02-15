@@ -42,6 +42,7 @@
 - [ ] Linearity analysis (mean signal vs exposure time)
 - [ ] DSNU / PRNU spatial maps
 - [ ] Per-pixel PTC histograms
+- [x] EMVA 1288 spec values integrated (LCG/HCG reference data from FRAMOS datasheets)
 - [ ] EMVA 1288 compliance report format
 - [ ] Multi-camera comparison support
 
@@ -151,3 +152,62 @@
 - **Updated Theory page** (Section 6): replaced "Exposure Sweep vs Gain Sweep" comparison with "Why Vary Exposure, Not Gain?" — shorter, clearer explanation of why gain sweep is not a valid PTC, with pointer to the new characterization page
 - Removed the gain sweep PTC fit line, K metric, R^2, and "used in fit" concepts from the gain sweep page entirely
 - **Next**: Continue Phase 3 enhancements or user testing
+
+### Session 10 — 2026-02-14
+- **Integrated EMVA 1288 spec values** from FRAMOS characterization reports for Sony IMX900-AMR-C
+- Extracted data from two PDF datasheets: LCG (0 dB, Low Conversion Gain) and HCG (3 dB, High Conversion Gain)
+- Added `EMVA_SPEC` dict to `ptc_analysis.py` (~65 lines) with all key parameters: K, 1/K, QE, read noise, FWC, DR, SNR, DSNU, PRNU, linearity error, black level, dark current
+- **Sensor Overview page**: added full EMVA 1288 spec table (LCG vs HCG), sensor model/pixel info, expandable explainer on how specs relate to our 90 dB measurements
+- **PTC Analysis page**: added side-by-side comparison table (Our PTC vs Spec LCG vs Spec HCG) after derived metrics section
+- **Sensor Metrics Dashboard**: added EMVA spec comparison metric cards with delta annotations
+- **Theory page**: enhanced Signal Chain Model section with explicit gain stage in signal chain diagram, added expandable "Gain architecture of the IMX900" panel explaining two-layer gain (CG mode + analog gain)
+- **Key insight confirmed**: K=3.13 DN/e- at 90 dB is consistent with the spec's K=0.40 (LCG) and K=1.67 (HCG) — higher analog gain produces proportionally higher K. The 90 dB gain register mapping is proprietary (not standard voltage dB).
+- Updated MEMORY.md with EMVA spec data, sensor model identification, gain architecture notes
+- **Next**: Commit and push; continue Phase 3 enhancements or frame simulation work
+
+### Session 11 — 2026-02-14 (Gain Investigation Session A)
+- **Added per-point gain sweep analysis** to `ptc_analysis.py` (~120 lines)
+- New `GainPointResult` dataclass: gain_db, mean_signal, pair_variance, dark_pair_variance, K_apparent, K_true, read_noise_dn, read_noise_e, n_electrons, sat_hi, sat_lo, gain_mode, exptime_ns
+- New `analyze_gain_sweep_per_point()` function: computes per-gain-level K estimates with read-noise correction
+- K_apparent (naive var/mean) is biased high by ~28% at 90 dB due to read noise; K_true uses quadratic correction
+- **Key results (GainSweep, 24 gain levels 30-220 dB):**
+  - K_true(90 dB) = 3.19 DN/e- vs ExposureSweep K = 3.13 DN/e- (+1.9%) -- **PASS** (<5% threshold)
+  - n_electrons = 28.0 +/- 1.2 e- (CV=4.2%) across 16 unsaturated points -- constant illumination confirmed
+  - sigma_read_e = 1.39 +/- 0.15 e- (input-referred, approximately constant across gains)
+  - GAINMODE = 1 at all 24 gain levels (single CG mode throughout sweep)
+  - Saturation onset at ~150 dB (5% sat_hi); gains 180+ dB are heavily clamp-distorted
+- Extended CLI test with verification checks and per-gain summary table
+- **Next**: Session B (gain model fitting) or Session C (app integration)
+
+### Session 12 — 2026-02-14 (Gain Investigation Session B)
+- **Added gain model fitting** to `ptc_analysis.py` (~60 lines new code)
+- New `GainModelResult` dataclass: K_0, dB_per_decade, dB_per_doubling, scale_factor, r_squared, n_points_used, gain_range, sigma_read_e_mean
+- New `fit_gain_model()` function: fits log10(K_true) = a + b * gain_dB via scipy.stats.linregress
+- **Key results (16 unsaturated points, 30-140 dB):**
+  - K_0 = 1.19 DN/e- (between EMVA LCG=0.40 and HCG=1.67 -- GAINMODE=1 is a specific CG configuration)
+  - dB_per_decade = 212.5 (AstroTracker dB for 10x K increase)
+  - dB_per_doubling = 64.0 (AstroTracker dB for 2x K increase)
+  - scale_factor = 10.63x (AstroTracker dB / standard voltage dB of 6.02)
+  - R^2 = 0.996 (excellent log-linear fit)
+  - Model prediction at 90 dB: K = 3.16 DN/e- vs ExposureSweep K = 3.13 (+0.8%)
+  - sigma_read_e_mean = 1.39 e- across all unsaturated gain levels
+- Extended CLI test: model parameters, 90 dB prediction, EMVA K_0 comparison, dB calibration table
+- **Key insight**: AstroTracker gain register uses a proprietary dB scale where 64 dB doubles K (vs 6 dB standard). The scale factor of ~10.6x means 90 AstroTracker dB ~ 8.5 standard voltage dB.
+- **Next**: Session C (Streamlit app integration) or further analysis
+
+### Session 13 -- 2026-02-14 (Gain Investigation Session C -- App Integration)
+- **Integrated per-point gain analysis and gain model into Streamlit app and demo data**
+- Updated `generate_demo_data.py`: calls `analyze_gain_sweep_per_point()` and `fit_gain_model()`, stores per_point_analysis (24 entries) and gain_model dict in demo_data.json
+- Regenerated `demo_data.json` (38.6 MB) with new gain analysis fields
+- Added `cached_gain_per_point()` and `get_gain_analysis()` to app.py for live/demo mode support
+  - Live mode passes ExposureSweep read_noise_e (2.78 e-) as sigma_read_e_anchor
+- **4 new sections on Gain Sweep Characterization page:**
+  1. **System Gain (K) vs Analog Gain** -- K_apparent (gray), K_true (blue), model fit line (orange dashed), ExposureSweep K reference star (gold). Log-scale Y axis. Metric cards: K_0, dB/decade, dB/doubling, R^2. Expander explaining quadratic correction.
+  2. **Read Noise vs Analog Gain** -- DN (growing) and e- (flat) traces with mean annotation. Expander on why input-referred noise is constant.
+  3. **Electron Count Consistency Check** -- n_electrons scatter with mean +/- std band. CV metric. Key self-consistency validation.
+  4. **dB Scale Calibration** -- Table mapping AstroTracker dB to standard voltage dB and predicted K, with EMVA LCG/HCG reference rows. Expander on proprietary dB scale.
+- **Enhanced per-gain summary table** with 5 new columns: K_apparent, K_true, Read Noise (DN), Read Noise (e-), n_electrons. NaN values shown as "-".
+- **Theory page Section 8**: "Gain Sweep Analysis Method" -- read-noise bias problem, quadratic correction derivation, exponential model fit, derived parameters, AstroTracker dB interpretation. All equations in st.latex() with \mathrm{}.
+- Validated all results match Sessions A/B: K_true(90dB)=3.19 (+1.9% vs 3.13), n_e=28.0+/-1.2, sigma_read_e=1.39, R^2=0.996
+- App verified: HTTP 200, no console errors, all data paths validated
+- **Next**: Commit and push (triggers Streamlit Cloud redeploy)
