@@ -44,15 +44,15 @@ DEMO_DATA_PATH = BASE_DIR / "demo_data.json"
 
 # Detect mode: LIVE if FITS data exists, DEMO otherwise
 SWEEP_DIRS = {
-    "Exposure Sweep (90 dB gain)": ARTIFACTS / "ExposureSweep_Gain90db",
+    "Exposure Sweep (9 dB gain)": ARTIFACTS / "ExposureSweep_Gain9db",
     "Gain Sweep (10 ms exposure)": ARTIFACTS / "GainSweep_10msExpoTime",
 }
 GLOBAL_BIAS_PATHS = [
-    ARTIFACTS / "ExposureSweep_Gain90db" / "BlackImage.fits",
-    ARTIFACTS / "ExposureSweep_Gain90db" / "Black_Image2.fits",
+    ARTIFACTS / "ExposureSweep_Gain9db" / "BlackImage.fits",
+    ARTIFACTS / "ExposureSweep_Gain9db" / "Black_Image2.fits",
 ]
 
-_exposure_dir = ARTIFACTS / "ExposureSweep_Gain90db"
+_exposure_dir = ARTIFACTS / "ExposureSweep_Gain9db"
 LIVE_MODE = _exposure_dir.is_dir() and any(_exposure_dir.glob("*/*.fits"))
 
 # Image dimensions (from sensor spec)
@@ -453,14 +453,14 @@ def page_sensor_overview(settings: dict):
     with st.expander("How do these specs relate to our measurements?"):
         st.markdown(
             "The EMVA 1288 specs characterize the **bare sensor** at low analog gain "
-            "(0 or 3 dB) with **12-bit output**. Our AstroTracker operates at **90 dB "
+            "(0 or 3 dB) with **12-bit output**. Our AstroTracker operates at **9 dB "
             "analog gain** with **8-bit clamped output**, which creates key differences:\n\n"
-            "- **System gain K** is much higher in our setup (3.13 DN/e- at 90 dB vs "
+            "- **System gain K** is much higher in our setup (3.13 DN/e- at 9 dB vs "
             "0.40 DN/e- at 0 dB) because analog gain amplifies the signal before digitization.\n"
             "- **FWC appears tiny** in our data (81 e-) because the 8-bit clamp at 255 DN "
             "cuts off the signal far before the sensor's true ~9,500 e- well fills. "
             "The true FWC is only accessible with 12-bit unclamped data.\n"
-            "- **Read noise in electrons** is comparable (2.78 e- at 90 dB vs 1.95-5.56 e- "
+            "- **Read noise in electrons** is comparable (2.78 e- at 9 dB vs 1.95-5.56 e- "
             "in the spec), which makes physical sense -- read noise originates at the pixel "
             "level before amplification.\n"
             "- **Quantum efficiency** (~90%) is an intrinsic pixel property and does not depend "
@@ -468,7 +468,7 @@ def page_sensor_overview(settings: dict):
             "light source).\n\n"
             "The gain architecture has two layers: a **hardware conversion gain mode** "
             "(LCG/HCG, which changes pixel capacitance) and an **analog gain amplifier** "
-            "(the dB setting). Our 90 dB setting applies high amplification on top of "
+            "(the dB setting). Our 9 dB setting applies amplification on top of "
             "whichever CG mode the AstroTracker firmware selects."
         )
 
@@ -643,7 +643,7 @@ def page_ptc_analysis(settings: dict):
         st.markdown("---")
         st.subheader("Comparison with EMVA 1288 Spec Values")
         st.markdown(
-            "Side-by-side comparison of our PTC-measured values (90 dB gain, 8-bit clamp) "
+            "Side-by-side comparison of our PTC-measured values (9 dB gain, 8-bit clamp) "
             "against the manufacturer EMVA 1288 specs (0-3 dB gain, 12-bit output)."
         )
 
@@ -659,7 +659,7 @@ def page_ptc_analysis(settings: dict):
                 "Dynamic Range (dB)",
                 "SNR_max",
             ],
-            "Our PTC (90 dB, 8-bit)": [
+            "Our PTC (9 dB, 8-bit)": [
                 f"{fit_dict['K_slope']:.4f}",
                 f"{fit_dict['conversion_gain']:.3f}",
                 f"{fit_dict['read_noise_e']:.2f}",
@@ -690,8 +690,8 @@ def page_ptc_analysis(settings: dict):
         st.dataframe(cmp_df, use_container_width=True, hide_index=True)
 
         st.info(
-            "**Why the big differences?** Our 90 dB analog gain amplifies the signal ~7.8x more than "
-            "HCG mode (K=3.13 vs 0.40 DN/e-). The 8-bit clamp at 255 DN then limits the measurable "
+            "**Why the big differences?** Our 9 dB analog gain amplifies the signal ~7.8x more than "
+            "LCG mode (K=3.13 vs 0.40 DN/e-). The 8-bit clamp at 255 DN then limits the measurable "
             "FWC to just 81 e-. The spec's true FWC of ~9,500 e- (LCG) is only accessible "
             "with 12-bit unclamped output at low gain."
         )
@@ -764,7 +764,7 @@ def page_metrics_dashboard(settings: dict):
         )
         st.caption(
             "Deltas are informational -- direct comparison is not meaningful because our "
-            "setup uses 90 dB analog gain + 8-bit clamp vs the spec's 0-3 dB gain + 12-bit output. "
+            "setup uses 9 dB analog gain + 8-bit clamp vs the spec's 0-3 dB gain + 12-bit output. "
             "See the Sensor Overview page for the full EMVA 1288 spec table."
         )
 
@@ -801,7 +801,7 @@ def page_gain_sweep(settings: dict):
     st.markdown(
         "How does the sensor respond across its analog gain range? "
         "This page shows signal, dark level, noise, and saturation "
-        "behavior at fixed 10 ms exposure as gain sweeps from 30 to 220 dB."
+        "behavior at fixed 10 ms exposure as gain sweeps from 3 to 22 dB."
     )
 
     if not settings["is_gain_sweep"]:
@@ -821,9 +821,9 @@ def page_gain_sweep(settings: dict):
     gain_nums = []
     for label in [p["label"] for p in pair_dicts]:
         try:
-            gain_nums.append(int(label.replace("db", "").replace("dB", "")))
+            gain_nums.append(float(label.replace("db", "").replace("dB", "")))
         except ValueError:
-            gain_nums.append(0)
+            gain_nums.append(0.0)
 
     means = [p["mean_signal"] for p in pair_dicts]
     variances_raw = np.array([p["variance"] for p in pair_dicts])
@@ -866,7 +866,7 @@ def page_gain_sweep(settings: dict):
     if LIVE_MODE:
         try:
             exp_settings = dict(settings, is_gain_sweep=False,
-                                sweep_folder=SWEEP_DIRS["Exposure Sweep (90 dB gain)"])
+                                sweep_folder=SWEEP_DIRS["Exposure Sweep (9 dB gain)"])
             exposure_fit, _ = run_analysis(exp_settings)
         except Exception:
             pass
@@ -977,7 +977,7 @@ def page_gain_sweep(settings: dict):
         # ExposureSweep K reference star
         exp_K = exposure_fit["K_slope"] if exposure_fit else 3.13
         fig_k.add_trace(go.Scatter(
-            x=[90], y=[exp_K],
+            x=[9], y=[exp_K],
             mode="markers",
             name=f"ExposureSweep K = {exp_K:.2f}",
             marker=dict(color="gold", size=14, symbol="star",
@@ -1004,7 +1004,7 @@ def page_gain_sweep(settings: dict):
         with st.expander("How is K_true computed?"):
             st.markdown(
                 "**K_apparent** = variance / mean overestimates K because the variance "
-                "includes read noise. At 90 dB, this overestimate is ~28%.\n\n"
+                "includes read noise. At 9 dB, this overestimate is ~28%.\n\n"
                 "**K_true** solves the full single-point PTC equation:\n"
             )
             st.latex(r"\mathrm{Var} = K \cdot \bar{S} + K^2 \cdot \sigma_{\mathrm{read},e^-}^2")
@@ -1136,35 +1136,35 @@ def page_gain_sweep(settings: dict):
             st.markdown(
                 "A low CV (< 10%) confirms that the gain correction is working correctly "
                 "and the illumination is indeed constant across the sweep. Saturated points "
-                "(> 150 dB) are excluded because clamp compression inflates the apparent electron count."
+                "(> 15 dB) are excluded because clamp compression inflates the apparent electron count."
             )
 
         # --- Section: dB Scale Calibration ---
         st.markdown("---")
         st.subheader("dB Scale Calibration")
         st.markdown(
-            "The AstroTracker uses a proprietary dB scale. This table maps AstroTracker dB "
+            "This table maps gain dB settings "
             "to equivalent standard voltage dB and the predicted system gain K."
         )
 
         cal_rows = []
-        for g_db in [0, 30, 50, 70, 90, 110, 130, 150]:
+        for g_db in [0, 3, 5, 7, 9, 11, 13, 15]:
             std_db = g_db / gm["scale_factor"]
             K_pred = gm["K_0"] * 10.0 ** (g_db / gm["dB_per_decade"])
             cal_rows.append({
-                "AstroTracker (dB)": g_db,
+                "Gain (dB)": g_db,
                 "Std Voltage (dB)": round(std_db, 1),
                 "Predicted K (DN/e-)": round(K_pred, 4),
             })
 
         # Add EMVA spec reference rows
         cal_rows.append({
-            "AstroTracker (dB)": "EMVA LCG (0 dB)",
+            "Gain (dB)": "EMVA LCG (0 dB)",
             "Std Voltage (dB)": 0.0,
             "Predicted K (DN/e-)": EMVA_SPEC["LCG"]["K_dn_per_e"],
         })
         cal_rows.append({
-            "AstroTracker (dB)": "EMVA HCG (3 dB)",
+            "Gain (dB)": "EMVA HCG (3 dB)",
             "Std Voltage (dB)": 3.0,
             "Predicted K (DN/e-)": EMVA_SPEC["HCG"]["K_dn_per_e"],
         })
@@ -1180,19 +1180,17 @@ def page_gain_sweep(settings: dict):
             f"{gm['K_0'] / EMVA_SPEC['HCG']['K_dn_per_e']:.2f}x respectively."
         )
 
-        with st.expander("Are these real dB?"):
+        with st.expander("Are these standard dB?"):
             st.markdown(
-                "**No** -- AstroTracker dB is a proprietary register scale, not standard "
-                "voltage dB.\n\n"
+                f"The gain values are close to standard voltage dB, with a small "
+                f"deviation:\n\n"
                 f"- Standard voltage dB: **6.02 dB** doubles the voltage (and K)\n"
-                f"- AstroTracker dB: **{gm['dB_per_doubling']:.0f} dB** doubles K\n"
-                f"- Scale factor: **{gm['scale_factor']:.1f}x** "
-                f"(AstroTracker dB / standard voltage dB)\n\n"
-                f"So \"90 dB\" in AstroTracker terms is really only "
-                f"**{90 / gm['scale_factor']:.1f} standard voltage dB** "
-                "of actual amplification -- a factor of "
-                f"~{10.0 ** (90 / gm['dB_per_decade']):.1f}x, not the "
-                f"~{10.0 ** (90 / 20.0):.0f}x that 90 standard dB would imply."
+                f"- Measured: **{gm['dB_per_doubling']:.1f} dB** doubles K\n"
+                f"- Scale factor: **{gm['scale_factor']:.2f}x** "
+                f"(measured / standard voltage dB)\n\n"
+                f"At 9 dB gain, the actual amplification is a factor of "
+                f"~{10.0 ** (9 / gm['dB_per_decade']):.1f}x "
+                f"(standard dB would predict ~{10.0 ** (9 / 20.0):.1f}x)."
             )
 
     # --- 2. Dark Level (Black Level) ---
@@ -1266,7 +1264,7 @@ def page_gain_sweep(settings: dict):
     st.subheader("Saturation vs Gain")
     st.markdown(
         "Fraction of ROI pixels hitting the floor (0 DN) or ceiling (255 DN). "
-        "Above ~150 dB, significant clipping begins."
+        "Above ~15 dB, significant clipping begins."
     )
 
     sat_his = [p["sat_hi"] * 100 for p in pair_dicts]
@@ -1425,7 +1423,7 @@ def page_ptc_derivation(settings: dict):
             "The PTC-measured **K** bundles both layers together. At the spec's 0 dB (LCG), "
             f"K = {EMVA_SPEC['LCG']['K_dn_per_e']} DN/e-. At 3 dB (HCG), "
             f"K = {EMVA_SPEC['HCG']['K_dn_per_e']} DN/e-. Our AstroTracker "
-            "at 90 dB measures K = 3.13 DN/e-, reflecting the high amplification.\n\n"
+            "at 9 dB measures K = 3.13 DN/e-, reflecting the amplification.\n\n"
             "**For PTC analysis and simulation, K is all you need** -- you don't need to "
             "know what fraction comes from conversion gain vs analog gain."
         )
@@ -1546,7 +1544,7 @@ def page_ptc_derivation(settings: dict):
         "The linear fit directly yields the system gain and read noise."
     )
     st.success(
-        "Our ExposureSweep dataset (16 exposure times, 3--36 ms, fixed 90 dB gain) "
+        "Our ExposureSweep dataset (16 exposure times, 3--36 ms, fixed 9 dB gain) "
         "gives K = 3.13 DN/e-, R^2 = 0.996 -- a textbook PTC result."
     )
 
@@ -1615,7 +1613,7 @@ def page_ptc_derivation(settings: dict):
         r"\frac{K^2 \cdot \sigma_{\mathrm{read},e^-}^2}{\bar{S}}"
     )
     st.markdown(
-        "At 90 dB this overestimate is ~28%. The bias is worse at higher gains "
+        "At 9 dB this overestimate is ~28%. The bias is worse at higher gains "
         "(larger K) and lower signal levels."
     )
 
@@ -1640,7 +1638,7 @@ def page_ptc_derivation(settings: dict):
     st.markdown("K_true grows exponentially with gain:")
     st.latex(r"K(g) = K_0 \cdot 10^{g\,/\,c}")
     st.markdown(
-        "where $g$ is AstroTracker dB and $c$ is the dB-per-decade constant. "
+        "where $g$ is gain in dB and $c$ is the dB-per-decade constant. "
         "Fitting in log space:"
     )
     st.latex(r"\log_{10}(K_{\mathrm{true}}) = a + b \cdot g")
@@ -1656,9 +1654,9 @@ def page_ptc_derivation(settings: dict):
         f"- K_0 = 1.19 DN/e- (extrapolated to 0 dB; between EMVA LCG = "
         f"{EMVA_SPEC['LCG']['K_dn_per_e']:.3f} and HCG = "
         f"{EMVA_SPEC['HCG']['K_dn_per_e']:.3f})\n"
-        "- dB per decade = 212.5, dB per doubling = 64.0\n"
-        "- AstroTracker dB is **proprietary**: ~10.6x standard voltage dB. "
-        "So 64 AstroTracker dB doubles K (vs 6.02 standard voltage dB).\n"
+        "- dB per decade = 21.25, dB per doubling = 6.4\n"
+        "- The gain dB scale is close to standard voltage dB "
+        "(6.4 dB to double K vs 6.02 standard).\n"
         "- GAINMODE = 1 at all 24 gain levels, confirming a single CG configuration "
         "across the sweep."
     )

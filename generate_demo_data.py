@@ -154,7 +154,7 @@ def process_sweep(sweep_path, bias_paths, sweep_key, is_gain_sweep=False):
 
 if __name__ == "__main__":
     # Exposure Sweep
-    sweep_exp = base / "ExposureSweep_Gain90db"
+    sweep_exp = base / "ExposureSweep_Gain9db"
     bias_paths = [sweep_exp / "BlackImage.fits", sweep_exp / "Black_Image2.fits"]
     demo["exposure_sweep"] = process_sweep(sweep_exp, bias_paths, "ExposureSweep")
 

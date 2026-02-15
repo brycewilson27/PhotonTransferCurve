@@ -55,7 +55,7 @@ DEFAULT_SAT_THRESH = 0.005    # 0.5 % of ROI pixels at clamp ceiling or floor
 # ---------------------------------------------------------------------------
 # Two operating points from the FRAMOS EMVA1288-compliant characterization.
 # These are the manufacturer/lab-grade specs at 12-bit output, 536 nm LED.
-# Our AstroTracker measurements are at 90 dB gain with 8-bit clamped output,
+# Our AstroTracker measurements are at 9 dB gain with 8-bit clamped output,
 # so direct comparison is not possible -- but these provide ground truth for
 # the underlying sensor capability.
 #
@@ -137,7 +137,7 @@ class FlatPairInfo:
     bright_b: Path
     dark_a: Path | None
     dark_b: Path | None
-    label: str                # subfolder name (e.g. "3ms", "90db")
+    label: str                # subfolder name (e.g. "3ms", "9db")
 
 
 @dataclass
@@ -181,7 +181,7 @@ class GainPointResult:
     Each instance represents one gain setting with per-point K estimates
     derived from a single bright pair and dark pair.
     """
-    gain_db: int              # Analog gain setting (AstroTracker dB)
+    gain_db: float            # Analog gain setting (dB)
     mean_signal: float        # Mean signal in ROI after bias subtraction (DN)
     pair_variance: float      # 0.5 * var(A-B) in ROI, bias-subtracted (DN^2)
     dark_pair_variance: float # 0.5 * var(darkA - darkB) in ROI (DN^2)
@@ -204,13 +204,12 @@ class GainModelResult:
     Model: log10(K_true) = a + b * gain_dB
     => K_true(g) = K_0 * 10^(g / dB_per_decade)
 
-    The AstroTracker uses a proprietary dB scale where the dB-per-doubling
-    differs from the standard 6.02 dB (voltage) or 3.01 dB (power).
-    The scale_factor quantifies this ratio.
+    The scale_factor quantifies the ratio of the measured dB-per-doubling
+    to the standard 6.02 dB (voltage) or 3.01 dB (power).
     """
     K_0: float                # K at 0 dB (extrapolated intercept, DN/e-)
-    dB_per_decade: float      # AstroTracker dB for a 10x increase in K
-    dB_per_doubling: float    # AstroTracker dB for a 2x increase in K
+    dB_per_decade: float      # dB for a 10x increase in K
+    dB_per_doubling: float    # dB for a 2x increase in K
     scale_factor: float       # dB_per_doubling / 6.02 (ratio to std voltage dB)
     r_squared: float          # R^2 of log-linear fit
     n_points_used: int        # Number of gain levels in the fit
@@ -272,7 +271,7 @@ def collect_flat_pairs(
 ) -> list[FlatPairInfo]:
     """Pair up flat-field FITS files within each subfolder.
 
-    Each subfolder (e.g. "3ms", "90db") contains uncompressed FITS files:
+    Each subfolder (e.g. "3ms", "9db") contains uncompressed FITS files:
     bright (illuminated) frames and dark frames prefixed with ``dark_``.
     Returns both the bright pair (for PTC analysis) and the dark pair
     (for use as local bias).
@@ -280,7 +279,7 @@ def collect_flat_pairs(
     Parameters
     ----------
     folder : str or Path
-        Top-level sweep directory (e.g. ExposureSweep_Gain90db/).
+        Top-level sweep directory (e.g. ExposureSweep_Gain9db/).
 
     Returns
     -------
@@ -290,9 +289,9 @@ def collect_flat_pairs(
     folder = Path(folder)
     pairs: list[FlatPairInfo] = []
 
-    # Natural sort key: extract numeric part from folder names like "3ms", "90db"
+    # Natural sort key: extract numeric part from folder names like "3ms", "9db"
     def _sort_key(p: Path) -> float:
-        m = re.match(r"(\d+)", p.name)
+        m = re.match(r"(\d+\.?\d*)", p.name)
         return float(m.group(1)) if m else float("inf")
 
     subdirs = sorted(
@@ -700,8 +699,8 @@ def analyze_gain_sweep_per_point(
 
         # --- Extract gain_db from folder label ---
         label = fp.label
-        m = re.match(r"(\d+)", label)
-        gain_db = int(m.group(1)) if m else 0
+        m = re.match(r"(\d+\.?\d*)", label)
+        gain_db = float(m.group(1)) if m else 0.0
 
         # --- K_apparent: naive variance / mean (biased by read noise) ---
         mean_sig = pr.mean_signal
@@ -807,8 +806,8 @@ def fit_gain_model(
 
     # Derived parameters
     K_0 = 10.0 ** intercept_a           # K at 0 dB (extrapolated)
-    dB_per_decade = 1.0 / slope_b       # AstroTracker dB for 10x K increase
-    dB_per_doubling = np.log10(2.0) / slope_b  # AstroTracker dB for 2x K increase
+    dB_per_decade = 1.0 / slope_b       # dB for 10x K increase
+    dB_per_doubling = np.log10(2.0) / slope_b  # dB for 2x K increase
     scale_factor = dB_per_doubling / 6.02  # ratio to standard voltage dB
 
     # Mean input-referred read noise across used points
@@ -837,7 +836,7 @@ def main() -> None:
     # ---------------------------------------------------------------
     # Part 1: Exposure Sweep PTC (existing)
     # ---------------------------------------------------------------
-    sweep = base / "ExposureSweep_Gain90db"
+    sweep = base / "ExposureSweep_Gain9db"
     bias_paths = [
         sweep / "BlackImage.fits",
         sweep / "Black_Image2.fits",
@@ -845,7 +844,7 @@ def main() -> None:
 
     print("=" * 70)
     print("Photon Transfer Curve Analysis")
-    print("Dataset: ExposureSweep_Gain90db")
+    print("Dataset: ExposureSweep_Gain9db")
     print(f"ROI: x={DEFAULT_ROI[0]}, y={DEFAULT_ROI[1]}, "
           f"w={DEFAULT_ROI[2]}, h={DEFAULT_ROI[3]}")
     print(f"Saturation threshold: {DEFAULT_SAT_THRESH * 100:.1f}%")
@@ -918,7 +917,7 @@ def main() -> None:
                 return f"{v:{w}.{d}f}"
             return "-".rjust(w)
 
-        print(f"{gp.gain_db:>5d}  "
+        print(f"{gp.gain_db:>5.1f}  "
               f"{fmt(gp.mean_signal, 7, 2)}  "
               f"{fmt(gp.pair_variance, 8, 2)}  "
               f"{fmt(gp.K_apparent, 7, 3)}  "
@@ -935,14 +934,14 @@ def main() -> None:
     print("Verification Checks")
     print(f"{'=' * 70}")
 
-    # Check 1: K_true at 90 dB vs exposure sweep K
-    gp_90 = [gp for gp in gp_results if gp.gain_db == 90]
-    if gp_90:
-        K_90 = gp_90[0].K_true
+    # Check 1: K_true at 9 dB vs exposure sweep K
+    gp_9 = [gp for gp in gp_results if gp.gain_db == 9]
+    if gp_9:
+        K_9 = gp_9[0].K_true
         K_exp = fit.K_slope
-        pct_diff = 100.0 * (K_90 - K_exp) / K_exp
+        pct_diff = 100.0 * (K_9 - K_exp) / K_exp
         status = "PASS" if abs(pct_diff) < 5.0 else "FAIL"
-        print(f"  K_true(90dB) = {K_90:.4f} DN/e-  "
+        print(f"  K_true(9dB) = {K_9:.4f} DN/e-  "
               f"vs ExposureSweep K = {K_exp:.4f} DN/e-  "
               f"({pct_diff:+.1f}%)  [{status}]")
 
@@ -986,18 +985,18 @@ def main() -> None:
     print(f"  dB per decade (10x K): {gm.dB_per_decade:.1f} dB")
     print(f"  dB per doubling (2x K): {gm.dB_per_doubling:.1f} dB")
     print(f"  Scale factor          : {gm.scale_factor:.2f}x  "
-          f"(AstroTracker dB / standard voltage dB)")
+          f"(measured dB / standard voltage dB)")
     print(f"  R-squared             : {gm.r_squared:.6f}")
     print(f"  Points used           : {gm.n_points_used}  "
           f"(gain range {gm.gain_range[0]:.0f} - {gm.gain_range[1]:.0f} dB)")
     print(f"  sigma_read_e (mean)   : {gm.sigma_read_e_mean:.2f} e-")
 
-    # Model prediction at 90 dB vs exposure sweep
-    K_pred_90 = gm.K_0 * 10.0 ** (90.0 / gm.dB_per_decade)
+    # Model prediction at 9 dB vs exposure sweep
+    K_pred_9 = gm.K_0 * 10.0 ** (9.0 / gm.dB_per_decade)
     K_exp = fit.K_slope
-    pct = 100.0 * (K_pred_90 - K_exp) / K_exp
-    print(f"\n  Model prediction at 90 dB: K = {K_pred_90:.4f} DN/e-")
-    print(f"  ExposureSweep PTC K      : {K_exp:.4f} DN/e-  ({pct:+.1f}%)")
+    pct = 100.0 * (K_pred_9 - K_exp) / K_exp
+    print(f"\n  Model prediction at 9 dB: K = {K_pred_9:.4f} DN/e-")
+    print(f"  ExposureSweep PTC K     : {K_exp:.4f} DN/e-  ({pct:+.1f}%)")
 
     # K_0 vs EMVA spec at 0 dB
     K_lcg = EMVA_SPEC["LCG"]["K_dn_per_e"]
@@ -1013,13 +1012,13 @@ def main() -> None:
           f"  (GAINMODE=1 is a specific CG configuration)")
 
     # dB calibration table
-    print(f"\n  {'AstroTracker dB':>16s}  {'Std Voltage dB':>15s}  "
+    print(f"\n  {'Gain (dB)':>16s}  {'Std Voltage dB':>15s}  "
           f"{'Predicted K':>12s}")
     print(f"  {'-' * 48}")
-    for g_db in [0, 30, 60, 90, 120, 150]:
+    for g_db in [0, 3, 6, 9, 12, 15]:
         std_db = g_db / gm.scale_factor
         K_pred = gm.K_0 * 10.0 ** (g_db / gm.dB_per_decade)
-        print(f"  {g_db:>16d}  {std_db:>15.1f}  {K_pred:>12.4f}")
+        print(f"  {g_db:>16.1f}  {std_db:>15.1f}  {K_pred:>12.4f}")
 
 
 if __name__ == "__main__":

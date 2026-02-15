@@ -27,8 +27,8 @@ Working directory: C:\Users\Bryce Wilson\Documents\PhotonTransferCurve
 **Repository structure:**
 - `ptc_analysis.py` — Phase 1 engine, fully validated (~555 lines)
 - `app.py` — Streamlit app, 6 pages (~1100 lines)
-- `PhotonTransferCurveArtifacts/ExposureSweep_Gain90db/` — 16 usable exposure levels (10ms/11ms empty), 2 bright + 2 dark frames per subfolder, global bias in root
-- `PhotonTransferCurveArtifacts/GainSweep_10msExpoTime/` — 24 gain levels (30-220dB), 2 bright + 2 dark frames per subfolder, no global bias
+- `PhotonTransferCurveArtifacts/ExposureSweep_Gain9db/` — 16 usable exposure levels (10ms/11ms empty), 2 bright + 2 dark frames per subfolder, global bias in root
+- `PhotonTransferCurveArtifacts/GainSweep_10msExpoTime/` — 24 gain levels (3-22dB), 2 bright + 2 dark frames per subfolder, no global bias
 - Dark frames prefixed with `dark_`. Bright frames are `astrotracker_pic*.fits`.
 - Sensor: CMOS AstroTracker, native 12-bit ADC, stored as 8-bit via CLAMP (not rescale)
 - CRITICAL: 1 stored DN = 1 native DN. Values 0-255 pass through, 256-4095 clip to 255. No scale factor.
@@ -109,12 +109,12 @@ Working directory: C:\Users\Bryce Wilson\Documents\PhotonTransferCurve
 - [ ] Multi-camera comparison support
 
 **Data structure:**
-- `PhotonTransferCurveArtifacts/ExposureSweep_Gain90db/` — 16 usable exposure levels (10ms/11ms empty), 2 bright + 2 dark per subfolder
+- `PhotonTransferCurveArtifacts/ExposureSweep_Gain9db/` — 16 usable exposure levels (10ms/11ms empty), 2 bright + 2 dark per subfolder
   - Subfolder names encode exposure time: "3ms", "4ms", ..., "36ms"
   - Dark frames prefixed with `dark_`. Bright frames are `astrotracker_pic*.fits` (no prefix).
   - Global bias: `BlackImage.fits`, `Black_Image2.fits` in the root
-- `PhotonTransferCurveArtifacts/GainSweep_10msExpoTime/` — 24 gain levels (30-220dB), same bright/dark structure
-  - Subfolder names encode gain: "30db", "40db", ..., "220db"
+- `PhotonTransferCurveArtifacts/GainSweep_10msExpoTime/` — 24 gain levels (3-22dB), same bright/dark structure
+  - Subfolder names encode gain: "3db", "4db", ..., "22db"
   - No global bias — local darks only
 
 **Streamlit app architecture:**
@@ -296,8 +296,8 @@ Working directory: C:\Users\Bryce Wilson\Documents\PhotonTransferCurve
 3. `LESSONS_LEARNED.md` -- technical pitfalls
 
 **Background:** We have two datasets:
-- ExposureSweep_Gain90db: 16 exposure levels at fixed 90 dB gain. PTC fit gives K=3.13 DN/e-, read_noise_e=2.78 e-, R^2=0.996.
-- GainSweep_10msExpoTime: 24 gain levels (30-220 dB) at fixed 10 ms exposure. 1 bright pair + 1 dark pair per gain level.
+- ExposureSweep_Gain9db: 16 exposure levels at fixed 9 dB gain. PTC fit gives K=3.13 DN/e-, read_noise_e=2.78 e-, R^2=0.996.
+- GainSweep_10msExpoTime: 24 gain levels (3-22 dB) at fixed 10 ms exposure. 1 bright pair + 1 dark pair per gain level.
 
 The gain sweep has variance and mean per gain level, but currently only computes an overall (meaningless) fit. We want per-point K estimates at each gain level to show how K changes with analog gain.
 
@@ -320,7 +320,7 @@ Add the following to `ptc_analysis.py`:
 3. **Command-line test** at the bottom (inside `if __name__ == "__main__":`):
    - Run analyze_gain_sweep_per_point() on the GainSweep folder
    - Print a table of results: gain_dB, mean, var, K_apparent, K_true, read_noise_dn, read_noise_e, n_electrons
-   - Verify: K_true at 90 dB should be within 5% of 3.13 (exposure sweep K)
+   - Verify: K_true at 9 dB should be within 5% of 3.13 (exposure sweep K)
    - Verify: n_electrons should be approximately constant (~28 e-) across unsaturated gains
    - Use ASCII-only print formatting (no Unicode -- Windows cp1252 console)
 
@@ -366,7 +366,7 @@ Working directory: C:\Users\Bryce Wilson\Documents\PhotonTransferCurve
 
 Add the following to `ptc_analysis.py`:
 
-1. **`GainModelResult` dataclass** with fields: K_0 (float, K at 0 dB), dB_per_decade (float, AstroTracker dB per 10x K increase), dB_per_doubling (float, per 2x K), scale_factor (float, ratio of AstroTracker dB to standard voltage dB -- should be ~10.6), r_squared (float), n_points_used (int), gain_range (tuple of min/max gain dB used), sigma_read_e_mean (float, mean input-referred read noise across gains).
+1. **`GainModelResult` dataclass** with fields: K_0 (float, K at 0 dB), dB_per_decade (float, AstroTracker dB per 10x K increase), dB_per_doubling (float, per 2x K), scale_factor (float, ratio of AstroTracker dB to standard voltage dB -- should be ~1.06), r_squared (float), n_points_used (int), gain_range (tuple of min/max gain dB used), sigma_read_e_mean (float, mean input-referred read noise across gains).
 
 2. **`fit_gain_model()` function** that:
    - Takes list[GainPointResult] and sat_thresh (default 0.005)
@@ -379,20 +379,20 @@ Add the following to `ptc_analysis.py`:
 3. **Extend the command-line test** (inside `if __name__ == "__main__":`):
    - After Session A output, call fit_gain_model() on the GainPointResult list
    - Print model parameters: K_0, dB_per_decade, dB_per_doubling, scale_factor, R^2
-   - Print model prediction at 90 dB and compare to exposure sweep K=3.13
+   - Print model prediction at 9 dB and compare to exposure sweep K=3.13
    - Print dB calibration table: a few key AstroTracker dB values -> equivalent standard voltage dB -> predicted K
    - Compare K_0 extrapolation at 0 dB to EMVA spec LCG (0.399) and HCG (1.673)
 
 **Expected results:**
-- K_true(g) = ~1.19 * 10^(g/212.5), R^2 ~ 0.996
-- dB_per_decade ~ 212.5, dB_per_doubling ~ 64, scale_factor ~ 10.6
+- K_true(g) = ~1.19 * 10^(g/21.25), R^2 ~ 0.996
+- dB_per_decade ~ 21.25, dB_per_doubling ~ 6.40, scale_factor ~ 1.063
 - K_0 ~ 1.19 (between EMVA LCG and HCG -- AstroTracker GAINMODE=1 is a specific CG configuration)
 - sigma_read_e_mean ~ 1.0-1.5 e-
 
 **MANDATORY: Documentation maintenance**
 After completing:
 - `PROGRESS.md`: Add session log entry with model fit results
-- `LESSONS_LEARNED.md`: Add insight about proprietary dB scale and K_0 vs EMVA specs
+- `LESSONS_LEARNED.md`: Add insight about near-standard dB scale and K_0 vs EMVA specs
 - `MEMORY.md`: Add gain model parameters (K_0, dB_per_decade, scale_factor)
 ```
 
@@ -416,27 +416,27 @@ Working directory: C:\Users\Bryce Wilson\Documents\PhotonTransferCurve
 **Background:** Sessions A and B added per-point K computation and gain model fitting to the engine. This session integrates those results into the Streamlit app and regenerates demo_data.json.
 
 **Verified results from Sessions A & B (use these for validation):**
-- 24 gain levels total (30-220 dB), 16 unsaturated (30-140 dB, sat_hi < 0.5%)
-- K_true(90 dB) = 3.19 DN/e- vs ExposureSweep K = 3.13 (+1.9%) -- PASS
-- K_apparent overestimates K_true by ~28% at 90 dB due to read-noise bias
+- 24 gain levels total (3-22 dB), 16 unsaturated (3-14 dB, sat_hi < 0.5%)
+- K_true(9 dB) = 3.19 DN/e- vs ExposureSweep K = 3.13 (+1.9%) -- PASS
+- K_apparent overestimates K_true by ~28% at 9 dB due to read-noise bias
 - n_electrons = 28.0 +/- 1.2 e- (CV=4.2%) across 16 unsaturated points
-- Gain model: K(g) = 1.19 * 10^(g/212.5), R^2 = 0.996
+- Gain model: K(g) = 1.19 * 10^(g/21.25), R^2 = 0.996
 - K_0 = 1.19 DN/e- (between EMVA LCG=0.40 and HCG=1.67; ratios 2.98x and 0.71x)
-- dB_per_decade = 212.5, dB_per_doubling = 64.0, scale_factor = 10.63x
+- dB_per_decade = 21.25, dB_per_doubling = 6.40, scale_factor = 1.063x
 - sigma_read_e_mean = 1.39 +/- 0.15 e- (dark pair-diff method, constant across gains)
 - GAINMODE = 1 at all 24 gain levels (single CG configuration)
-- Saturation onset at ~150 dB (5% sat_hi); gains 160+ are clamp-distorted
+- Saturation onset at ~15 dB (5% sat_hi); gains 16+ are clamp-distorted
 
 **Critical function signatures (for live mode calls):**
 - `analyze_gain_sweep_per_point(sweep_folder, roi, sigma_read_e_anchor=2.78, apply_quant_corr=True)` -> list[GainPointResult]
   - sigma_read_e_anchor MUST come from ExposureSweep PTC intercept (2.78 e- = fit.read_noise_e)
   - In app.py, pass the exposure sweep's read_noise_e as the anchor when computing live
 - `fit_gain_model(gain_points, sat_thresh=0.005)` -> GainModelResult
-  - sat_thresh=0.005 filters to 16 of 24 points (30-140 dB range)
+  - sat_thresh=0.005 filters to 16 of 24 points (3-14 dB range)
 
 **Two different read noise values -- don't confuse them:**
 - PTC intercept read noise: 8.71 DN = 2.78 e- (from ExposureSweep fit y-intercept; includes all constant noise sources)
-- Dark pair-diff read noise: ~4.3 DN = ~1.39 e- at 90 dB (from 0.5*var(darkA-darkB); purer readout noise floor)
+- Dark pair-diff read noise: ~4.3 DN = ~1.39 e- at 9 dB (from 0.5*var(darkA-darkB); purer readout noise floor)
 - The read_noise_dn/read_noise_e in GainPointResult are the dark pair-diff values (they grow in DN with gain, stay flat at ~1.39 e-)
 - The sigma_read_e_anchor=2.78 is the PTC intercept value used for the K_true quadratic correction
 
@@ -459,11 +459,11 @@ Insert AFTER the existing "Signal Amplification" section and BEFORE "Temporal No
 - Load per_point_analysis from demo data (or compute live)
 - Plotly scatter: K_apparent (gray markers, label "K_apparent (biased)") and K_true (blue markers) vs gain_dB
 - Overlay: exponential model fit line (orange dashed, from gain_model K_0 and dB_per_decade)
-- Reference marker: exposure sweep K=3.13 at 90 dB (gold star, use `marker=dict(symbol="star", size=14)`)
+- Reference marker: exposure sweep K=3.13 at 9 dB (gold star, use `marker=dict(symbol="star", size=14)`)
 - Only show unsaturated points (filter by sat_hi < threshold from sidebar)
 - Metric cards row: K_0, dB_per_decade, dB_per_doubling, model R^2
 - Expander: "How is K_true computed?" explaining the read-noise correction:
-  - K_apparent = var/mean overestimates by ~28% at 90 dB
+  - K_apparent = var/mean overestimates by ~28% at 9 dB
   - PTC at single point: var = K*mean + K^2*sigma_read_e^2
   - Quadratic solution: K = (-mean + sqrt(mean^2 + 4*sigma_read_e^2*var)) / (2*sigma_read_e^2)
   - Uses sigma_read_e = 2.78 e- from ExposureSweep PTC intercept as anchor
@@ -481,15 +481,15 @@ Insert AFTER the existing "Signal Amplification" section and BEFORE "Temporal No
 - Horizontal band showing mean +/- std (use add_hrect)
 - Metric: mean n_electrons = ~28.0, std = ~1.2, CV = ~4.2%
 - This is the key self-consistency check: fixed illumination (10 ms) = fixed electron count regardless of gain
-- Note in text: saturated points (>150 dB) show inflated n_electrons due to clamp compression
+- Note in text: saturated points (>15 dB) show inflated n_electrons due to clamp compression
 
 **Section: "dB Scale Calibration"**
 - DataFrame table: AstroTracker dB -> equivalent standard voltage dB -> predicted K
 - Compute: std_voltage_dB = astrotracker_dB / scale_factor; predicted_K = K_0 * 10^(g/dB_per_decade)
-- Show rows for 0, 30, 50, 70, 90, 110, 130, 150 dB
-- Add EMVA spec K values: LCG = 0.399 at 0 dB, HCG = 1.673 at 3 dB as reference rows
+- Show rows for 0, 3, 5, 7, 9, 11, 13, 15 dB
+- Add EMVA spec K values: LCG = 0.399 at 0 dB, HCG = 1.673 at 3 dB analog gain as reference rows
 - Note K_0 = 1.19 falls between LCG and HCG (ratio 2.98x / 0.71x)
-- Expander: "Are these real dB?" -- AstroTracker dB is a proprietary register scale (~10.6x standard voltage dB). 64 AstroTracker dB doubles K, vs 6.02 standard voltage dB. So "90 dB" is really only ~8.5 standard voltage dB of actual amplification.
+- Expander: "Are these real dB?" -- AstroTracker dB is a near-standard register scale (~1.063x standard voltage dB). 6.40 AstroTracker dB doubles K, vs 6.02 standard voltage dB. So "9 dB" is equivalent to ~8.5 standard voltage dB of actual amplification.
 
 ### Step 3: Enhance the existing per-gain summary table
 Add columns: K_apparent (DN/e-), K_true (DN/e-), Read Noise (DN), Read Noise (e-), n_electrons
@@ -498,12 +498,12 @@ Update CSV export to include these.
 
 ### Step 4: Add Theory page section 8
 Add "8. Gain Sweep Analysis Method" to page_ptc_derivation() after existing section 7:
-- Explain K_apparent = var/mean is biased high by read noise (~28% at 90 dB)
+- Explain K_apparent = var/mean is biased high by read noise (~28% at 9 dB)
 - Show the PTC single-point equation: var = K*mean + K^2*sigma_read_e^2
 - Show the quadratic correction formula for K_true
 - Explain the exponential model K(g) = K_0 * 10^(g/c), fit via log10(K) = a + b*g
 - Derived parameters: K_0 = 10^a, dB_per_decade = 1/b, dB_per_doubling = log10(2)/b
-- Note AstroTracker "dB" is proprietary: ~10.6x standard voltage dB, so 64 dB to double K (not 6.02)
+- Note AstroTracker "dB" is near-standard: ~1.063x standard voltage dB, so 6.40 dB to double K (vs 6.02 standard)
 - Mention K_0 = 1.19 falls between EMVA LCG (0.40) and HCG (1.67) because GAINMODE=1
 - Use st.latex() for equations (KaTeX -- use \mathrm{} not \text{})
 
@@ -520,7 +520,7 @@ Add "8. Gain Sweep Analysis Method" to page_ptc_derivation() after existing sect
 - Launch app: `streamlit run app.py --server.port 9501`
 - Switch to Gain Sweep dataset in sidebar
 - Go to "Gain Sweep Characterization" page -- verify all 4 new sections render
-- Verify K_true(90 dB) ~ 3.19 matches exposure sweep K=3.13 within 5%
+- Verify K_true(9 dB) ~ 3.19 matches exposure sweep K=3.13 within 5%
 - Verify n_electrons plot is approximately flat at ~28 e-
 - Verify read_noise_e plot is approximately flat at ~1.39 e-
 - Verify model fit line passes through the K_true data points

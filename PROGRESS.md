@@ -208,6 +208,26 @@
   4. **dB Scale Calibration** -- Table mapping AstroTracker dB to standard voltage dB and predicted K, with EMVA LCG/HCG reference rows. Expander on proprietary dB scale.
 - **Enhanced per-gain summary table** with 5 new columns: K_apparent, K_true, Read Noise (DN), Read Noise (e-), n_electrons. NaN values shown as "-".
 - **Theory page Section 8**: "Gain Sweep Analysis Method" -- read-noise bias problem, quadratic correction derivation, exponential model fit, derived parameters, AstroTracker dB interpretation. All equations in st.latex() with \mathrm{}.
-- Validated all results match Sessions A/B: K_true(90dB)=3.19 (+1.9% vs 3.13), n_e=28.0+/-1.2, sigma_read_e=1.39, R^2=0.996
+- Validated all results match Sessions A/B: K_true(9dB)=3.19 (+1.9% vs 3.13), n_e=28.0+/-1.2, sigma_read_e=1.39, R^2=0.996
 - App verified: HTTP 200, no console errors, all data paths validated
-- **Next**: Commit and push (triggers Streamlit Cloud redeploy)
+
+### Session 16: Gain Value Correction (dB /10)
+**Key discovery**: The AstroTracker gain values were reported as "ticks" of 0.1 dB increments, not actual dB. All gain values must be divided by 10:
+- "90 dB" → 9 dB, "30 dB" → 3 dB, "220 dB" → 22 dB, etc.
+- Fractional values: 35→3.5, 45→4.5, 55→5.5, 65→6.5
+
+**Changes made:**
+- Renamed `ExposureSweep_Gain90db/` → `ExposureSweep_Gain9db/`
+- Renamed all 24 GainSweep subdirectories (30db→3db, 35db→3.5db, ..., 220db→22db)
+- Updated `ptc_analysis.py`: gain_db type int→float, regex for float folder names, all hardcoded 90→9 refs, calibration table values
+- Updated `app.py`: all dataset paths, display text, calibration table, gain range references across all 6 pages
+- Updated `generate_demo_data.py`: path to ExposureSweep_Gain9db
+- Regenerated `demo_data.json` with corrected gain values
+
+**Updated model parameters (÷10 from previous):**
+- dB_per_decade: 212.5 → 21.25
+- dB_per_doubling: 64.0 → 6.40 (now very close to standard 6.02 voltage dB!)
+- scale_factor: 10.63 → 1.063 (nearly 1.0 — these are near-standard dB)
+- gain_range: [30, 140] → [3.0, 14.0]
+- K_0, R^2 unchanged (1.19 DN/e-, 0.996)
+- **Key insight**: The dB scale is actually near-standard, NOT proprietary. The previous "proprietary" interpretation was an artifact of the 10x error.

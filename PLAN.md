@@ -5,10 +5,10 @@
 ### Files
 - **1 MATLAB script**: `PhotonTransferCurveArtifacts/CMOS_PhotonTransferCurve_v3_both.m`
 - **324 FITS files** (~807 MB total) across two datasets:
-  - **ExposureSweep_Gain90db/** — 18 exposure times (3–36 ms) at fixed 90 dB gain
-  - **GainSweep_10msExpoTime/** — 24 gain levels (30–220 dB) at fixed 10 ms exposure
+  - **ExposureSweep_Gain9db/** — 18 exposure times (3–36 ms) at fixed 9 dB gain
+  - **GainSweep_10msExpoTime/** — 24 gain levels (3–22 dB) at fixed 10 ms exposure
 - Each subdirectory: 4 uncompressed + 4 compressed `.fits` files
-- Black/bias frames in `ExposureSweep_Gain90db/` (BlackImage, Black_Image2)
+- Black/bias frames in `ExposureSweep_Gain9db/` (BlackImage, Black_Image2)
 - **Sensor**: CMOS AstroTracker star tracker, native 12-bit ADC, stored as 8-bit via **clamp** (not rescale — values 0–255 pass through, 256–4095 clip to 255)
 - **Important**: 1 stored DN = 1 native DN. No scale factor. Effective dynamic range is bottom 6.2% of sensor.
 
