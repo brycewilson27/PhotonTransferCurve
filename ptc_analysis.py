@@ -17,8 +17,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from astropy.io import fits
-from scipy import stats
+
+# Lazy imports: astropy and scipy are only needed for FITS I/O and fitting,
+# not for constants/dicts. Defer so demo mode (Streamlit Cloud) works even
+# if these packages fail to install.
+fits = None   # astropy.io.fits -- loaded on first use
+stats = None  # scipy.stats -- loaded on first use
+
+
+def _ensure_fits():
+    """Lazy-load astropy.io.fits."""
+    global fits
+    if fits is None:
+        from astropy.io import fits as _fits
+        fits = _fits
+
+
+def _ensure_stats():
+    """Lazy-load scipy.stats."""
+    global stats
+    if stats is None:
+        from scipy import stats as _stats
+        stats = _stats
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +234,7 @@ def load_fits_image(path: str | Path) -> np.ndarray:
     np.ndarray
         2-D image array (float64).
     """
+    _ensure_fits()
     with fits.open(str(path)) as hdu_list:
         data = hdu_list[0].data
     if data is None:
@@ -449,6 +470,7 @@ def fit_ptc(
         )
 
     # Ordinary least-squares: Var = K * Mean + intercept
+    _ensure_stats()
     slope, intercept, r_value, _, _ = stats.linregress(
         means[mask], variances[mask]
     )
@@ -713,6 +735,7 @@ def analyze_gain_sweep_per_point(
         gain_mode = 0
         exptime_ns = 0
         try:
+            _ensure_fits()
             with fits.open(str(fp.bright_a)) as hdul:
                 hdr = hdul[0].header
                 gain_mode = int(hdr.get("GAINMODE", 0))
@@ -778,6 +801,7 @@ def fit_gain_model(
     log_K = np.log10(np.array([gp.K_true for gp in used], dtype=np.float64))
 
     # Linear fit: log10(K_true) = a + b * gain_dB
+    _ensure_stats()
     slope_b, intercept_a, r_value, _, _ = stats.linregress(gain_arr, log_K)
     r_squared = r_value ** 2
 
